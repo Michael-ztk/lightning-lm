@@ -21,6 +21,10 @@ void PointCloudPreprocess::Process(const sensor_msgs::msg::PointCloud2 ::SharedP
             VelodyneHandler(msg);
             break;
 
+        case LidarType::ROBOSENSE:
+            RobosenseHandler(msg);
+            break;
+
         default:
             LOG(ERROR) << "Error LiDAR Type";
             break;
@@ -188,6 +192,68 @@ void PointCloudPreprocess::VelodyneHandler(const sensor_msgs::msg::PointCloud2::
             if (added_pt.x * added_pt.x + added_pt.y * added_pt.y + added_pt.z * added_pt.z > (blind_ * blind_)) {
                 cloud_out_.points.push_back(added_pt);
             }
+        }
+    }
+
+    cloud_out_.width = cloud_out_.size();
+    cloud_out_.height = 1;
+    cloud_out_.is_dense = false;
+}
+
+void PointCloudPreprocess::RobosenseHandler(const sensor_msgs::msg::PointCloud2::SharedPtr &msg) {
+    cloud_out_.clear();
+    cloud_full_.clear();
+
+    pcl::PointCloud<robosense_ros::Point> pl_orig;
+    pcl::fromROSMsg(*msg, pl_orig);
+    const int plsize = pl_orig.points.size();
+    if (plsize == 0) {
+        cloud_out_.width = 0;
+        cloud_out_.height = 1;
+        cloud_out_.is_dense = false;
+        return;
+    }
+
+    cloud_out_.reserve(plsize);
+
+    auto push_point = [this](const robosense_ros::Point &src_pt, double rel_time_ms) {
+        PointType added_pt;
+        added_pt.x = src_pt.x;
+        added_pt.y = src_pt.y;
+        added_pt.z = src_pt.z;
+        added_pt.intensity = src_pt.intensity;
+        added_pt.time = rel_time_ms;
+
+        if (added_pt.x * added_pt.x + added_pt.y * added_pt.y + added_pt.z * added_pt.z > (blind_ * blind_)) {
+            cloud_out_.points.push_back(added_pt);
+        }
+    };
+
+    const bool organized_cloud = pl_orig.width > 0 && pl_orig.height > 0 &&
+                                 static_cast<size_t>(pl_orig.width) * static_cast<size_t>(pl_orig.height) ==
+                                     pl_orig.points.size();
+
+    if (organized_cloud) {
+        const double start_time = pl_orig.at(0, 0).timestamp;
+        for (uint32_t col = 0; col < pl_orig.width; ++col) {
+            for (uint32_t row = 0; row < pl_orig.height; ++row) {
+                if (row % point_filter_num_ != 0) {
+                    continue;
+                }
+
+                const auto &ori_point = pl_orig.at(col, row);
+                push_point(ori_point, (ori_point.timestamp - start_time) * 1e3);
+            }
+        }
+    } else {
+        const double start_time = pl_orig.points.front().timestamp;
+        for (int i = 0; i < plsize; ++i) {
+            if (i % point_filter_num_ != 0) {
+                continue;
+            }
+
+            const auto &ori_point = pl_orig.points[i];
+            push_point(ori_point, (ori_point.timestamp - start_time) * 1e3);
         }
     }
 
