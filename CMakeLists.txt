@@ -8,7 +8,7 @@ if (NOT CMAKE_CXX_STANDARD)
 endif ()
 
 # set to release by default
-# set(CMAKE_BUILD_TYPE Release)
+set(CMAKE_BUILD_TYPE Release)
 
 # -------------------------------------------------------------
 # 导入第三方库，同时做一些全局编译选项配置
