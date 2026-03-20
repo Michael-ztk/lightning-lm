@@ -14,8 +14,8 @@ fasterlio:
   time_scale: 1e-3             # 兼容不同数据集的时间单位，仅对Velodyne LiDAR(lidar_type=2)生效
 
   skip_lidar_num: 0 # 点云的跳帧情况
-  point_filter_num: 10 # 点云采样参数
-  max_iteration: 4 # 最大迭代次数
+  point_filter_num: 6 # 点云采样参数
+  max_iteration: 6 # 最大迭代次数
   filter_size_scan: 0.5 # 对scan进行的降采样
   filter_size_map: 0.5
 
