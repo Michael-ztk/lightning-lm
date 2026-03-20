@@ -62,6 +62,7 @@ class LocSystem {
     std::string imu_topic_;
     std::string cloud_topic_;
     std::string livox_topic_;
+    bool imu_in_g_ = false;
 
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_ = nullptr;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_ = nullptr;

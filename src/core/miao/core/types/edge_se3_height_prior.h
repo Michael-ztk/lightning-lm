@@ -18,18 +18,20 @@ class EdgeHeightPrior : public BaseUnaryEdge<1, double, VertexSE3> {
    public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
+    void SetGravityDirection(const Vec3d& gravity_dir) { gravity_dir_ = gravity_dir; }
+
     void ComputeError() override {
         SE3 pose = ((VertexSE3 *)(vertices_[0]))->Estimate();
-        error_[0] = pose.translation()[2] - measurement_;
+        error_[0] = gravity_dir_.dot(pose.translation()) - measurement_;
     }
 
     void LinearizeOplus() override {
-        auto v0 = (VertexSE3 *)(vertices_[0]);
         jacobian_oplus_xi_.setZero();
-
-        Vec3d j = v0->Estimate().so3().matrix().block<1, 3>(2, 0).transpose();
-        jacobian_oplus_xi_.head<3>() = j;
+        jacobian_oplus_xi_.block<1, 3>(0, 0) = gravity_dir_.transpose();
     }
+
+   private:
+    Vec3d gravity_dir_ = Vec3d::UnitZ();
 };
 }  // namespace lightning::miao
 

@@ -11,8 +11,10 @@
 #include "wrapper/ros_utils.h"
 
 #include <yaml-cpp/yaml.h>
+#include <chrono>
 #include <filesystem>
 #include <opencv2/opencv.hpp>
+#include <thread>
 
 namespace lightning {
 
@@ -87,6 +89,7 @@ bool SlamSystem::Init(const std::string& yaml_path) {
         imu_topic_ = yaml["common"]["imu_topic"].as<std::string>();
         cloud_topic_ = yaml["common"]["lidar_topic"].as<std::string>();
         livox_topic_ = yaml["common"]["livox_lidar_topic"].as<std::string>();
+        imu_in_g_ = yaml["common"]["imu_in_g"].as<bool>();
 
         rclcpp::QoS qos(10);
         // qos.best_effort();
@@ -99,6 +102,9 @@ bool SlamSystem::Init(const std::string& yaml_path) {
                     Vec3d(msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z);
                 imu->angular_velocity =
                     Vec3d(msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z);
+                if (imu_in_g_) {
+                    imu->linear_acceleration *= 9.81;
+                }
 
                 ProcessIMU(imu);
             });
@@ -134,6 +140,16 @@ void SlamSystem::StartSLAM(std::string map_name) {
     running_ = true;
 }
 
+void SlamSystem::WaitForUIExit() {
+    if (!ui_) {
+        return;
+    }
+
+    while (!ui_->ShouldQuit() && !debug::flg_exit) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+}
+
 void SlamSystem::SaveMap(const SaveMapService::Request::SharedPtr request,
                          SaveMapService::Response::SharedPtr response) {
     map_name_ = request->map_id;
@@ -166,7 +182,7 @@ void SlamSystem::SaveMap(const std::string& path) {
     tm_options.map_path_ = save_path;
 
     TiledMap tm(tm_options);
-    SE3 start_pose = lio_->GetAllKeyframes().front()->GetOptPose();
+    SE3 start_pose = lio_->GetAllKeyframes().front()->GetOptLidarPose();
     tm.ConvertFromFullPCD(global_map, start_pose, save_path);
 
     pcl::io::savePCDFileBinaryCompressed(save_path + "/global.pcd", *global_map);

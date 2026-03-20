@@ -11,6 +11,11 @@
 #include "wrapper/bag_io.h"
 #include "wrapper/ros_utils.h"
 
+#include "io/yaml_io.h"
+
+#include <chrono>
+#include <thread>
+
 DEFINE_string(input_bag, "", "输入数据包");
 DEFINE_string(config, "./config/default.yaml", "配置文件");
 
@@ -29,6 +34,8 @@ int main(int argc, char** argv) {
     using namespace lightning;
 
     RosbagIO rosbag(FLAGS_input_bag);
+    lightning::YAML_IO yaml(FLAGS_config);
+    rosbag.SetImuInG(yaml.GetValue<bool>("common", "imu_in_g"));
 
     LaserMapping lio;
     if (!lio.Init(FLAGS_config)) {
@@ -69,7 +76,9 @@ int main(int argc, char** argv) {
     lio.SaveMap();
     Timer::PrintAll();
 
-    ui->Quit();
+    while (!ui->ShouldQuit() && !debug::flg_exit) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
 
     LOG(INFO) << "done";
 

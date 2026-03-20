@@ -1,6 +1,9 @@
 #include <pcl/common/transforms.h>
 #include <pcl_conversions/pcl_conversions.h>
 
+#include <chrono>
+#include <thread>
+
 #include "core/localization/lidar_loc/lidar_loc.h"
 #include "core/localization/localization.h"
 #include "core/localization/pose_graph/pgo.h"
@@ -319,6 +322,16 @@ void Localization::Finish() {
 
     lidar_loc_proc_cloud_.Quit();
     lidar_odom_proc_cloud_.Quit();
+}
+
+void Localization::WaitForUIExit() {
+    if (!ui_) {
+        return;
+    }
+
+    while (!ui_->ShouldQuit() && !debug::flg_exit) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
 }
 
 void Localization::SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vector3d& t) {

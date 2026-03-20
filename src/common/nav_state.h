@@ -171,6 +171,7 @@ struct NavState {
     }
 
     inline SE3 GetPose() const { return SE3(rot_, pos_); }
+    inline SE3 GetLidarPose() const { return SE3(rot_ * offset_R_lidar_, pos_ + rot_ * offset_t_lidar_); }
     inline SO3 GetRot() const { return rot_; }
     inline void SetPose(const SE3& pose) {
         rot_ = pose.so3();

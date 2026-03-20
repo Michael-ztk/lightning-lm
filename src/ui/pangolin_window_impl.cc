@@ -46,7 +46,7 @@ void PangolinWindowImpl::Reset(const std::vector<Keyframe::Ptr> &keyframes) {
     traj_scans_->Clear();
 
     for (const auto &keyframe : keyframes) {
-        traj_scans_->AddPt(keyframe->GetOptPose());
+        traj_scans_->AddPt(keyframe->GetOptLidarPose());
     }
 
     std::size_t i = keyframes.size() > max_size_of_current_scan_ ? keyframes.size() - max_size_of_current_scan_ : 0;
@@ -54,13 +54,13 @@ void PangolinWindowImpl::Reset(const std::vector<Keyframe::Ptr> &keyframes) {
         const auto &keyframe = keyframes.at(i);
         current_scan_ui_ = std::make_shared<ui::UiCloud>();
         CloudPtr tmp_cloud = std::make_shared<PointCloudType>(*(keyframe->GetCloud()));
-        current_scan_ui_->SetCloud(math::VoxelGrid(tmp_cloud, 0.5), keyframe->GetOptPose());
+        current_scan_ui_->SetCloud(math::VoxelGrid(tmp_cloud, 0.5), keyframe->GetOptLidarPose());
         current_scan_ui_->SetRenderColor(ui::UiCloud::UseColor::HEIGHT_COLOR);
 
         scans_.emplace_back(current_scan_ui_);
     }
 
-    newest_backend_pose_ = keyframes.back()->GetOptPose();
+    newest_backend_pose_ = keyframes.back()->GetOptLidarPose();
 }
 
 bool PangolinWindowImpl::DeInit() {
@@ -230,8 +230,8 @@ void PangolinWindowImpl::DrawAll() {
             glColor3f(0.5, 0.0, 0.5);
 
             for (int i = 0; i < all_keyframes_.size() - 1; ++i) {
-                auto p1 = all_keyframes_[i]->GetOptPose().translation();
-                auto p2 = all_keyframes_[i + 1]->GetOptPose().translation();
+                auto p1 = all_keyframes_[i]->GetOptLidarPose().translation();
+                auto p2 = all_keyframes_[i + 1]->GetOptLidarPose().translation();
 
                 glVertex3f(p1[0], p1[1], p1[2]);
                 glVertex3f(p2[0], p2[1], p2[2]);

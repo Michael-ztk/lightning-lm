@@ -8,6 +8,7 @@
 #include "utils/pointcloud_utils.h"
 
 #include <pcl/common/transforms.h>
+#include <pcl/io/pcd_io.h>
 #include <pcl/registration/ndt.h>
 
 #include "core/opti_algo/algo_select.h"
@@ -50,6 +51,8 @@ void LoopClosing::Init(const std::string yaml_path) {
         options_.closest_id_th_ = yaml.GetValue<int>("loop_closing", "closest_id_th");
         options_.max_range_ = yaml.GetValue<double>("loop_closing", "max_range");
         options_.ndt_score_th_ = yaml.GetValue<double>("loop_closing", "ndt_score_th");
+        options_.source_submap_idx_range_ = yaml.GetValue<int>("loop_closing", "source_submap_idx_range");
+        options_.source_submap_stride_ = yaml.GetValue<int>("loop_closing", "source_submap_stride");
         options_.with_height_ = yaml.GetValue<bool>("loop_closing", "with_height");
     }
 
@@ -120,13 +123,13 @@ void LoopClosing::DetectLoopCandidates() {
             break;
         }
 
-        Vec3d dt = kf->GetOptPose().translation() - cur_kf_->GetOptPose().translation();
+        Vec3d dt = kf->GetOptBodyPose().translation() - cur_kf_->GetOptBodyPose().translation();
         double t2d = dt.head<2>().norm();  // x-y distance
         double range_th = options_.max_range_;
 
         if (t2d < range_th) {
             LoopCandidate c(kf->GetID(), cur_kf_->GetID());
-            c.Tij_ = kf->GetLIOPose().inverse() * cur_kf_->GetLIOPose();
+            c.Tij_ = kf->GetLIOBodyPose().inverse() * cur_kf_->GetLIOBodyPose();
 
             candidates_.emplace_back(c);
             check_first = kf;
@@ -167,14 +170,17 @@ void LoopClosing::ComputeLoopCandidates() {
 
 void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
     LOG(INFO) << "aligning " << c.idx1_ << " with " << c.idx2_;
-    const int submap_idx_range = 40;
+    const int target_submap_idx_range = 40;
+    const int target_submap_stride = 4;
+    const int source_submap_idx_range = std::max(0, options_.source_submap_idx_range_);
+    const int source_submap_stride = std::max(1, options_.source_submap_stride_);
     auto kf1 = all_keyframes_.at(c.idx1_), kf2 = all_keyframes_.at(c.idx2_);
 
-    auto build_submap = [this](int given_id, bool build_in_world) -> CloudPtr {
+    auto build_submap = [this](int given_id, int idx_range, int idx_stride, bool build_in_world) -> CloudPtr {
         CloudPtr submap(new PointCloudType);
-        for (int idx = -submap_idx_range; idx < submap_idx_range; idx += 4) {
+        for (int idx = -idx_range; idx <= idx_range; idx += idx_stride) {
             int id = idx + given_id;
-            if (id < 0 || id > all_keyframes_.size()) {
+            if (id < 0 || id >= static_cast<int>(all_keyframes_.size())) {
                 continue;
             }
 
@@ -188,10 +194,10 @@ void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
             }
 
             // 转到世界系下
-            SE3 Twb = kf->GetLIOPose();
+            SE3 Twb = kf->GetLIOLidarPose();
 
             if (!build_in_world) {
-                Twb = all_keyframes_.at(given_id)->GetLIOPose().inverse() * Twb;
+                Twb = all_keyframes_.at(given_id)->GetLIOLidarPose().inverse() * Twb;
             }
 
             CloudPtr cloud_trans(new PointCloudType);
@@ -202,16 +208,16 @@ void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
         return submap;
     };
 
-    auto submap_kf1 = build_submap(kf1->GetID(), true);
+    auto submap_kf1 = build_submap(kf1->GetID(), target_submap_idx_range, target_submap_stride, true);
 
-    CloudPtr submap_kf2 = kf2->GetCloud();
+    auto submap_kf2 = build_submap(kf2->GetID(), source_submap_idx_range, source_submap_stride, false);
 
     if (submap_kf1->empty() || submap_kf2->empty()) {
         c.ndt_score_ = 0;
         return;
     }
 
-    Mat4f Tw2 = kf2->GetLIOPose().matrix().cast<float>();
+    Mat4f Tw2 = kf2->GetLIOLidarPose().matrix().cast<float>();
 
     /// 不同分辨率下的匹配
     CloudPtr output(new PointCloudType);
@@ -242,7 +248,13 @@ void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
     q.normalize();
     Vec3d t = T.block<3, 1>(0, 3);
 
-    c.Tij_ = kf1->GetLIOPose().inverse() * SE3(q, t);
+    SE3 Twl2_aligned(q, t);
+    SE3 Tl2b2 = kf2->GetLIOLidarPose().inverse() * kf2->GetLIOBodyPose();
+    SE3 Twb2_aligned = Twl2_aligned * Tl2b2;
+    c.Tij_ = kf1->GetLIOBodyPose().inverse() * Twb2_aligned;
+
+    // LOG(INFO) << "lc result " << c.idx1_ << " -> " << c.idx2_ << ": score=" << c.ndt_score_ << ", Tw2_t="
+    //           << t.transpose() << ", Tij_t=" << c.Tij_.translation().transpose() << ", saved=" << prefix;
 
     // pcl::io::savePCDFileBinaryCompressed(
     //     "./data/lc_" + std::to_string(c.idx1_) + "_" + std::to_string(c.idx2_) + "_out.pcd", *output);
@@ -253,7 +265,7 @@ void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
 void LoopClosing::PoseOptimization() {
     auto v = std::make_shared<miao::VertexSE3>();
     v->SetId(cur_kf_->GetID());
-    v->SetEstimate(cur_kf_->GetOptPose());
+    v->SetEstimate(cur_kf_->GetOptBodyPose());
 
     optimizer_->AddVertex(v);
     kf_vert_.emplace_back(v);
@@ -269,7 +281,7 @@ void LoopClosing::PoseOptimization() {
             e->SetVertex(0, optimizer_->GetVertex(last_kf->GetID()));
             e->SetVertex(1, v);
 
-            SE3 motion = last_kf->GetLIOPose().inverse() * cur_kf_->GetLIOPose();
+            SE3 motion = last_kf->GetLIOBodyPose().inverse() * cur_kf_->GetLIOBodyPose();
             e->SetMeasurement(motion);
             e->SetInformation(info_motion_);
             optimizer_->AddEdge(e);
@@ -279,8 +291,15 @@ void LoopClosing::PoseOptimization() {
     if (options_.with_height_) {
         /// 高度约束
         auto e = std::make_shared<miao::EdgeHeightPrior>();
+        Vec3d gravity_dir = -cur_kf_->GetState().grav_.vec_;
+        if (gravity_dir.norm() > 1e-6) {
+            gravity_dir.normalize();
+        } else {
+            gravity_dir = Vec3d::UnitZ();
+        }
         e->SetVertex(0, v);
         e->SetMeasurement(0);
+        e->SetGravityDirection(gravity_dir);
         e->SetInformation(Mat1d::Identity() * 1.0 / (options_.height_noise_ * options_.height_noise_));
         optimizer_->AddEdge(e);
     }
@@ -336,7 +355,7 @@ void LoopClosing::PoseOptimization() {
     /// get results
     for (auto& vert : kf_vert_) {
         SE3 pose = vert->Estimate();
-        all_keyframes_[vert->GetId()]->SetOptPose(pose);
+        all_keyframes_[vert->GetId()]->SetOptBodyPose(pose);
     }
 
     if (loop_cb_) {
@@ -345,8 +364,8 @@ void LoopClosing::PoseOptimization() {
 
     LOG(INFO) << "optimize finished, loops: " << edge_loops_.size();
 
-    // LOG(INFO) << "lc: cur kf " << cur_kf_->GetID() << ", opt: " << cur_kf_->GetOptPose().translation().transpose()
-    //           << ", lio: " << cur_kf_->GetLIOPose().translation().transpose();
+    // LOG(INFO) << "lc: cur kf " << cur_kf_->GetID() << ", opt: " << cur_kf_->GetOptBodyPose().translation().transpose()
+    //           << ", lio: " << cur_kf_->GetLIOBodyPose().translation().transpose();
 }
 
 }  // namespace lightning

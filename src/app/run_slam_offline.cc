@@ -49,6 +49,7 @@ int main(int argc, char** argv) {
     lightning::YAML_IO yaml(FLAGS_config);
     std::string lidar_topic = yaml.GetValue<std::string>("common", "lidar_topic");
     std::string imu_topic = yaml.GetValue<std::string>("common", "imu_topic");
+    rosbag.SetImuInG(yaml.GetValue<bool>("common", "imu_in_g"));
 
     rosbag
         /// IMU 的处理
@@ -74,6 +75,8 @@ int main(int argc, char** argv) {
 
     slam.SaveMap("");
     Timer::PrintAll();
+
+    slam.WaitForUIExit();
 
     LOG(INFO) << "done";
 

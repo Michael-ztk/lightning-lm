@@ -33,6 +33,7 @@ bool LocSystem::Init(const std::string &yaml_path) {
     imu_topic_ = yaml.GetValue<std::string>("common", "imu_topic");
     cloud_topic_ = yaml.GetValue<std::string>("common", "lidar_topic");
     livox_topic_ = yaml.GetValue<std::string>("common", "livox_lidar_topic");
+    imu_in_g_ = yaml.GetValue<bool>("common", "imu_in_g");
 
     rclcpp::QoS qos(10);
 
@@ -43,6 +44,9 @@ bool LocSystem::Init(const std::string &yaml_path) {
             imu->linear_acceleration =
                 Vec3d(msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z);
             imu->angular_velocity = Vec3d(msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z);
+            if (imu_in_g_) {
+                imu->linear_acceleration *= 9.81;
+            }
 
             ProcessIMU(imu);
         });

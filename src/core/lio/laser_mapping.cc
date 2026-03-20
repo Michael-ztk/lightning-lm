@@ -187,7 +187,7 @@ bool LaserMapping::Run() {
             /// 更新UI中的内容
             if (ui_) {
                 ui_->UpdateNavState(kf_.GetX());
-                ui_->UpdateScan(scan_undistort_, kf_.GetX().GetPose());
+                ui_->UpdateScan(scan_undistort_, kf_.GetX().GetLidarPose());
             }
 
             return false;
@@ -248,14 +248,14 @@ bool LaserMapping::Run() {
     // update local map
     Timer::Evaluate([&, this]() { MapIncremental(); }, "    Incremental Mapping");
 
-    LOG(INFO) << "[ mapping ]: In num: " << scan_undistort_->points.size() << " down " << cur_pts
-              << " Map grid num: " << ivox_->NumValidGrids() << " effect num : " << effect_feat_num_;
+    // LOG(INFO) << "[ mapping ]: In num: " << scan_undistort_->points.size() << " down " << cur_pts
+    //           << " Map grid num: " << ivox_->NumValidGrids() << " effect num : " << effect_feat_num_;
 
     /// keyframes
     if (last_kf_ == nullptr) {
         MakeKF();
     } else {
-        SE3 last_pose = last_kf_->GetLIOPose();
+        SE3 last_pose = last_kf_->GetLIOBodyPose();
         SE3 cur_pose = state_point_.GetPose();
         if ((last_pose.translation() - cur_pose.translation()).norm() > options_.kf_dis_th_ ||
             (last_pose.so3().inverse() * cur_pose.so3()).log().norm() > options_.kf_angle_th_) {
@@ -277,7 +277,7 @@ bool LaserMapping::Run() {
     }
 
     if (ui_) {
-        ui_->UpdateScan(scan_undistort_, state_point_.GetPose());
+        ui_->UpdateScan(scan_undistort_, state_point_.GetLidarPose());
     }
 
     return true;
@@ -290,19 +290,20 @@ void LaserMapping::MakeKF() {
         // LOG(INFO) << "last kf lio: " << last_kf_->GetLIOPose().translation().transpose()
         //           << ", opt: " << last_kf_->GetOptPose().translation().transpose();
 
-        /// opt pose 用之前的递推
-        SE3 delta = last_kf_->GetLIOPose().inverse() * kf->GetLIOPose();
-        kf->SetOptPose(last_kf_->GetOptPose() * delta);
+        SE3 delta = last_kf_->GetLIOBodyPose().inverse() * kf->GetLIOBodyPose();
+        kf->SetOptBodyPose(last_kf_->GetOptBodyPose() * delta);
     } else {
-        kf->SetOptPose(kf->GetLIOPose());
+        kf->SetOptBodyPose(kf->GetLIOBodyPose());
     }
 
     kf->SetState(state_point_);
 
-    LOG(INFO) << "LIO: create kf " << kf->GetID() << ", state: " << state_point_.pos_.transpose()
-              << ", kf opt pose: " << kf->GetOptPose().translation().transpose()
-              << ", lio pose: " << kf->GetLIOPose().translation().transpose() << ", time: " << std::setprecision(14)
-              << state_point_.timestamp_;
+    // LOG(INFO) << "LIO: create kf " << kf->GetID() << ", state: " << state_point_.pos_.transpose()
+    //           << ", lio_body: " << kf->GetLIOBodyPose().translation().transpose()
+    //           << ", lio_lidar: " << kf->GetLIOLidarPose().translation().transpose()
+    //           << ", opt_body: " << kf->GetOptBodyPose().translation().transpose()
+    //           << ", opt_lidar: " << kf->GetOptLidarPose().translation().transpose() << ", time: "
+    //           << std::setprecision(14) << state_point_.timestamp_;
 
     if (options_.is_in_slam_mode_) {
         all_keyframes_.emplace_back(kf);
@@ -670,14 +671,14 @@ CloudPtr LaserMapping::GetGlobalMap(bool use_lio_pose, bool use_voxel, float res
         CloudPtr cloud_trans(new PointCloudType);
 
         if (use_lio_pose) {
-            pcl::transformPointCloud(*cloud_filter, *cloud_trans, kf->GetLIOPose().matrix());
+            pcl::transformPointCloud(*cloud_filter, *cloud_trans, kf->GetLIOLidarPose().matrix());
         } else {
-            pcl::transformPointCloud(*cloud_filter, *cloud_trans, kf->GetOptPose().matrix());
+            pcl::transformPointCloud(*cloud_filter, *cloud_trans, kf->GetOptLidarPose().matrix());
         }
 
         *global_map += *cloud_trans;
 
-        LOG(INFO) << "kf " << kf->GetID() << ", pose: " << kf->GetOptPose().translation().transpose();
+        // LOG(INFO) << "kf " << kf->GetID() << ", pose: " << kf->GetOptLidarPose().translation().transpose();
     }
 
     CloudPtr global_map_filtered(new PointCloudType);
@@ -691,6 +692,32 @@ CloudPtr LaserMapping::GetGlobalMap(bool use_lio_pose, bool use_voxel, float res
     global_map_filtered->is_dense = false;
     global_map_filtered->height = 1;
     global_map_filtered->width = global_map_filtered->size();
+
+    if (!all_keyframes_.empty()) {
+        auto start_kf = all_keyframes_.front();
+        auto end_kf = all_keyframes_.back();
+
+        Vec3d start_pos = start_kf->GetOptLidarPose().translation();
+        Vec3d end_pos = end_kf->GetOptLidarPose().translation();
+        Vec3d delta = end_pos - start_pos;
+
+        Vec3d gravity_axis = -start_kf->GetState().grav_.vec_;
+        double gravity_norm = gravity_axis.norm();
+        double drift_along_gravity = 0.0;
+        double drift_orthogonal_gravity = 0.0;
+
+        if (gravity_norm > 1e-6) {
+            gravity_axis /= gravity_norm;
+            drift_along_gravity = delta.dot(gravity_axis);
+            drift_orthogonal_gravity = (delta - drift_along_gravity * gravity_axis).norm();
+        }
+
+        LOG(INFO) << "lidar trajectory start: " << start_pos.transpose();
+        LOG(INFO) << "lidar trajectory end: " << end_pos.transpose();
+        LOG(INFO) << "lidar trajectory gravity axis: " << gravity_axis.transpose();
+        LOG(INFO) << "lidar trajectory drift along gravity: " << drift_along_gravity;
+        LOG(INFO) << "lidar trajectory drift orthogonal gravity: " << drift_orthogonal_gravity;
+    }
 
     LOG(INFO) << "global map: " << global_map_filtered->size();
 

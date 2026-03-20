@@ -71,6 +71,8 @@ class Localization {
     /// 结束，保存临时地图
     void Finish();
 
+    void WaitForUIExit();
+
     /// 异步处理函数
     void LidarOdomProcCloud(CloudPtr);
     void LidarLocProcCloud(CloudPtr);

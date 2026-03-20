@@ -59,7 +59,7 @@ void PangolinWindow::UpdatePointCloudDynamic(const std::map<int, CloudPtr>& clou
 void PangolinWindow::UpdateNavState(const NavState& state) {
     std::unique_lock<std::mutex> lock_lio_res(impl_->mtx_nav_state_);
 
-    impl_->pose_ = state.GetPose();
+    impl_->pose_ = state.GetLidarPose();
     impl_->vel_ = state.GetVel();
     impl_->bias_acc_ = state.Getba();
     impl_->bias_gyr_ = state.Getbg();

@@ -42,6 +42,7 @@ int main(int argc, char** argv) {
     lightning::YAML_IO yaml(FLAGS_config);
     std::string lidar_topic = yaml.GetValue<std::string>("common", "lidar_topic");
     std::string imu_topic = yaml.GetValue<std::string>("common", "imu_topic");
+    rosbag.SetImuInG(yaml.GetValue<bool>("common", "imu_in_g"));
 
     rosbag
         .AddImuHandle(imu_topic,
@@ -65,6 +66,7 @@ int main(int argc, char** argv) {
         .Go();
 
     Timer::PrintAll();
+    loc.WaitForUIExit();
     loc.Finish();
 
     LOG(INFO) << "done";

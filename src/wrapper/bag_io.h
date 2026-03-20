@@ -59,6 +59,8 @@ class RosbagIO {
      */
     void Go(int sleep_usec = 0);
 
+    void SetImuInG(bool imu_in_g) { imu_in_g_ = imu_in_g; }
+
     /// 通用处理函数
     RosbagIO &AddHandle(const std::string &topic_name, MessageProcessFunction func) {
         process_func_.emplace(topic_name, func);
@@ -99,7 +101,9 @@ class RosbagIO {
             /// NOTE: 如果需要乘重力，请修改此处
             imu->linear_acceleration =
                 Vec3d(msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z);
-            // constant::kGRAVITY;
+            if (imu_in_g_) {
+                imu->linear_acceleration *= 9.81;
+            }
             imu->angular_velocity = Vec3d(msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z);
 
             return f(imu);
@@ -132,6 +136,7 @@ class RosbagIO {
 
     std::string bag_file_;
     DatasetType dataset_type_ = DatasetType::NCLT;
+    bool imu_in_g_ = false;
 };
 }  // namespace lightning
 

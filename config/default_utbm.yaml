@@ -67,6 +67,8 @@ loop_closing:
   closest_id_th: 50     # 历史关键帧与当前帧的ID间隔
   max_range: 30.0       # 候选帧的最大距离
   ndt_score_th: 1.0     # ndt位姿分值
+  source_submap_idx_range: 0
+  source_submap_stride: 1
   with_height: true
 
 

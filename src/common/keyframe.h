@@ -20,35 +20,52 @@ class Keyframe {
 
     Keyframe() {}
     Keyframe(unsigned long id, CloudPtr cloud, NavState state)
-        : id_(id), cloud_(cloud), state_(state), pose_lio_(state.GetPose()) {
+        : id_(id), cloud_(cloud), state_(state), pose_lio_body_(state.GetPose()) {
         timestamp_ = state_.timestamp_;
-        pose_opt_ = pose_lio_;
+        pose_opt_body_ = pose_lio_body_;
     }
 
     unsigned long GetID() const { return id_; }
     CloudPtr GetCloud() const { return cloud_; }
 
-    SE3 GetLIOPose() {
+    SE3 GetLIOBodyPose() {
         UL lock(data_mutex_);
-        return pose_lio_;
+        return pose_lio_body_;
     }
 
-    void SetLIOPose(const SE3& pose) {
+    SE3 GetLIOLidarPose() {
         UL lock(data_mutex_);
-        pose_lio_ = pose;
-
-        // also set opt
-        pose_opt_ = pose_lio_;
+        return pose_lio_body_ * GetBodyToLidarLocked();
     }
 
-    SE3 GetOptPose() {
+    void SetLIOBodyPose(const SE3& pose) {
         UL lock(data_mutex_);
-        return pose_opt_;
+        pose_lio_body_ = pose;
     }
 
-    void SetOptPose(const SE3& pose) {
+    void SetLIOLidarPose(const SE3& pose) {
         UL lock(data_mutex_);
-        pose_opt_ = pose;
+        pose_lio_body_ = pose * GetLidarToBodyLocked();
+    }
+
+    SE3 GetOptBodyPose() {
+        UL lock(data_mutex_);
+        return pose_opt_body_;
+    }
+
+    SE3 GetOptLidarPose() {
+        UL lock(data_mutex_);
+        return pose_opt_body_ * GetBodyToLidarLocked();
+    }
+
+    void SetOptBodyPose(const SE3& pose) {
+        UL lock(data_mutex_);
+        pose_opt_body_ = pose;
+    }
+
+    void SetOptLidarPose(const SE3& pose) {
+        UL lock(data_mutex_);
+        pose_opt_body_ = pose * GetLidarToBodyLocked();
     }
 
     void SetState(NavState s) {
@@ -68,10 +85,14 @@ class Keyframe {
     CloudPtr cloud_ = nullptr;  /// 降采样之后的点云
 
     std::mutex data_mutex_;
-    SE3 pose_lio_;  // 前端的pose
-    SE3 pose_opt_;  // 后端优化后的pose
+    SE3 pose_lio_body_;
+    SE3 pose_opt_body_;
 
     NavState state_;  // 卡尔曼滤波器状态
+
+   private:
+    SE3 GetBodyToLidarLocked() const { return SE3(state_.offset_R_lidar_, state_.offset_t_lidar_); }
+    SE3 GetLidarToBodyLocked() const { return GetBodyToLidarLocked().inverse(); }
 };
 
 }  // namespace lightning

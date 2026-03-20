@@ -178,7 +178,7 @@ bool G2P5::ResizeMap(const std::vector<Keyframe::Ptr> &kfs, G2P5MapPtr &map) {
         }
 
         auto kf = *it;
-        SE3 pose = kf->GetOptPose();
+        SE3 pose = kf->GetOptLidarPose();
         auto cloud = kf->GetCloud();
 
         if (pose.translation().x() < min_x) {
@@ -290,7 +290,7 @@ void G2P5::Convert3DTo2DScan(Keyframe::Ptr kf, G2P5MapPtr &map) {
     std::vector<Vec2d> angle_distance_height(360, Vec2d::Zero());  // 每个角度上的距离-高度值
     std::vector<Vec3d> pts_3d;                                     /// 距离地面0.3 ～ 1.2米之间的点云，激光坐标系下
 
-    SE3 Twb = kf->GetOptPose();
+    SE3 Twb = kf->GetOptLidarPose();
 
     double min_th = options_.min_th_floor_;
     double max_th = options_.max_th_floor_;
@@ -403,7 +403,7 @@ void G2P5::Convert3DTo2DScan(Keyframe::Ptr kf, G2P5MapPtr &map) {
 void G2P5::SetWhitePoints(const std::vector<Vec2d> &pt2d, Keyframe::Ptr kf, G2P5MapPtr &map) {
     assert(pt2d.size() == 360);
 
-    SE3 pose = kf->GetOptPose();
+    SE3 pose = kf->GetOptLidarPose();
     Vec3d orig = pose.translation();
 
     for (int i = 0; i < 360; ++i) {
