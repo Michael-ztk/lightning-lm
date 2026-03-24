@@ -36,6 +36,8 @@ fasterlio:
                  0, 0, -1 ]
 
   keep_first_imu_estimation: false
+  kf_dis_th: 2.0
+  kf_angle_th: 15.0
 
 g2p5:
   esti_floor: false   # 是否动态估计地面
@@ -62,11 +64,11 @@ system:
   pub_tf: true
 
 loop_closing:
-  loop_kf_gap: 5       # 每隔多少个关键帧检查一次
+  loop_kf_gap: 10       # 每隔多少个关键帧检查一次
   min_id_interval: 50   # 被检查的关键帧ID间隔
   closest_id_th: 50     # 历史关键帧与当前帧的ID间隔
   max_range: 4.0       # 候选帧的最大距离
-  ndt_score_th: 1.5     # ndt位姿分值
+  ndt_score_th: 1.0     # ndt位姿分值
   source_submap_idx_range: 0
   source_submap_stride: 1
   with_height: false

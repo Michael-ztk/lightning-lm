@@ -180,7 +180,7 @@ void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
         CloudPtr submap(new PointCloudType);
         for (int idx = -idx_range; idx <= idx_range; idx += idx_stride) {
             int id = idx + given_id;
-            if (id < 0 || id >= static_cast<int>(all_keyframes_.size())) {
+            if (id < 0 || id >= all_keyframes_.size()) {
                 continue;
             }
 
@@ -197,7 +197,7 @@ void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
             SE3 Twb = kf->GetLIOLidarPose();
 
             if (!build_in_world) {
-                Twb = all_keyframes_.at(given_id)->GetLIOLidarPose().inverse() * Twb;
+                Twb = all_keyframes_.at(given_id)->GetOptLidarPose().inverse() * Twb;
             }
 
             CloudPtr cloud_trans(new PointCloudType);
@@ -217,7 +217,7 @@ void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
         return;
     }
 
-    Mat4f Tw2 = kf2->GetLIOLidarPose().matrix().cast<float>();
+    Mat4f Tw2 = kf2->GetOptLidarPose().matrix().cast<float>();
 
     /// 不同分辨率下的匹配
     CloudPtr output(new PointCloudType);
@@ -249,9 +249,9 @@ void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
     Vec3d t = T.block<3, 1>(0, 3);
 
     SE3 Twl2_aligned(q, t);
-    SE3 Tl2b2 = kf2->GetLIOLidarPose().inverse() * kf2->GetLIOBodyPose();
+    SE3 Tl2b2 = kf2->GetOptLidarPose().inverse() * kf2->GetOptBodyPose();
     SE3 Twb2_aligned = Twl2_aligned * Tl2b2;
-    c.Tij_ = kf1->GetLIOBodyPose().inverse() * Twb2_aligned;
+    c.Tij_ = kf1->GetOptBodyPose().inverse() * Twb2_aligned;
 
     // LOG(INFO) << "lc result " << c.idx1_ << " -> " << c.idx2_ << ": score=" << c.ndt_score_ << ", Tw2_t="
     //           << t.transpose() << ", Tij_t=" << c.Tij_.translation().transpose() << ", saved=" << prefix;
@@ -324,9 +324,9 @@ void LoopClosing::PoseOptimization() {
         return;
     }
 
-    if (candidates_.empty()) {
-        return;
-    }
+    // if (candidates_.empty()) {
+    //     return;
+    // }
 
     optimizer_->InitializeOptimization();
     optimizer_->SetVerbose(false);

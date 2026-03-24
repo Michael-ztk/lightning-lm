@@ -42,7 +42,7 @@ void PointCloudPreprocess::Process(const livox_ros_driver2::msg::CustomMsg::Shar
     cloud_out_.reserve(plsize);
     cloud_full_.resize(plsize);
 
-    std::vector<bool> is_valid_pt(plsize, false);
+    std::vector<char> is_valid_pt(plsize, 0);
     std::vector<uint> index(plsize - 1);
     for (uint i = 0; i < plsize - 1; ++i) {
         index[i] = i + 1;  // 从1开始
@@ -66,7 +66,7 @@ void PointCloudPreprocess::Process(const livox_ros_driver2::msg::CustomMsg::Shar
                         (cloud_full_[i].x * cloud_full_[i].x + cloud_full_[i].y * cloud_full_[i].y +
                              cloud_full_[i].z * cloud_full_[i].z >
                          (blind_ * blind_))) {
-                    is_valid_pt[i] = true;
+                    is_valid_pt[i] = 1;
                 }
             }
         }
@@ -87,6 +87,7 @@ void PointCloudPreprocess::Process(const livox_ros_driver2::msg::CustomMsg::Shar
 void PointCloudPreprocess::Oust64Handler(const sensor_msgs::msg::PointCloud2::SharedPtr &msg) {
     cloud_out_.clear();
     cloud_full_.clear();
+
     pcl::PointCloud<ouster_ros::Point> pl_orig;
     pcl::fromROSMsg(*msg, pl_orig);
     int plsize = pl_orig.size();
@@ -104,13 +105,17 @@ void PointCloudPreprocess::Oust64Handler(const sensor_msgs::msg::PointCloud2::Sh
             continue;
         }
 
+        if (pl_orig.points[i].z < height_min_ || pl_orig.points[i].z > height_max_) {
+            continue;
+        }
+
         PointType added_pt;
         added_pt.x = pl_orig.points[i].x;
         added_pt.y = pl_orig.points[i].y;
         added_pt.z = pl_orig.points[i].z;
         added_pt.intensity = pl_orig.points[i].intensity;
-        added_pt.time = pl_orig.points[i].t / 1e6;  // curvature unit: ms
 
+        added_pt.time = pl_orig.points[i].t / 1e6;
         cloud_out_.points.push_back(added_pt);
     }
 

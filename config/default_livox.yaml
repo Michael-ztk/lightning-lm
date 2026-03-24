@@ -35,6 +35,8 @@ fasterlio:
                  0, 1, 0,
                  0, 0, 1 ]
   keep_first_imu_estimation: false
+  kf_dis_th: 2.0
+  kf_angle_th: 15.0
 
 
 g2p5:
