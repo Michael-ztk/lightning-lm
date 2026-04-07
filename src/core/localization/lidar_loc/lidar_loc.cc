@@ -131,17 +131,17 @@ bool LidarLoc::ProcessCloud(CloudPtr cloud_input) {
         return false;
     }
 
-    // CloudPtr cloud(new PointCloudType);
-    // pcl::VoxelGrid<PointType> voxel;
+    CloudPtr cloud(new PointCloudType);
+    pcl::VoxelGrid<PointType> voxel;
 
-    // float sz = 0.1;
-    // voxel.setLeafSize(sz, sz, sz);
-    // voxel.setInputCloud(cloud_input);
-    // voxel.filter(*cloud);
+    float sz = 0.2;
+    voxel.setLeafSize(sz, sz, sz);
+    voxel.setInputCloud(cloud_input);
+    voxel.filter(*cloud);
 
     current_scan_ = cloud_input;
 
-    Align(cloud_input);
+    Align(cloud);
     return true;
 }
 

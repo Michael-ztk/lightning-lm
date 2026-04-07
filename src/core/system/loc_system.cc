@@ -58,7 +58,7 @@ bool LocSystem::Init(const std::string &yaml_path) {
 
     livox_sub_ = node_->create_subscription<livox_ros_driver2::msg::CustomMsg>(
         livox_topic_, qos, [this](livox_ros_driver2::msg::CustomMsg ::SharedPtr cloud) {
-            Timer::Evaluate([&]() { ProcessLidar(cloud); }, "Proc Lidar", true);
+            Timer::Evaluate([&]() { ProcessLidar(cloud); }, "Proc Lidar", false);
         });
 
     if (options_.pub_tf_) {

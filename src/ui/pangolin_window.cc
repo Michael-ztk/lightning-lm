@@ -8,6 +8,7 @@ PangolinWindow::~PangolinWindow() { Quit(); }
 bool PangolinWindow::Init() {
     impl_->cloud_global_need_update_.store(false);
     impl_->kf_result_need_update_.store(false);
+    impl_->lio_pose_need_update_.store(false);
     impl_->lidarloc_need_update_.store(false);
     impl_->current_scan_need_update_.store(false);
 
@@ -71,6 +72,12 @@ void PangolinWindow::UpdateNavState(const NavState& state) {
 void PangolinWindow::UpdateRecentPose(const SE3& pose) {
     std::lock_guard<std::mutex> lock(impl_->mtx_nav_state_);
     impl_->newest_frontend_pose_ = pose;
+}
+
+void PangolinWindow::UpdateLioPose(const SE3& pose) {
+    std::lock_guard<std::mutex> lock(impl_->mtx_nav_state_);
+    impl_->newest_lio_pose_ = pose;
+    impl_->lio_pose_need_update_.store(true);
 }
 
 void PangolinWindow::UpdateScan(CloudPtr cloud, const SE3& pose) {

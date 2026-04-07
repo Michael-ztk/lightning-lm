@@ -25,6 +25,7 @@ bool PangolinWindowImpl::Init() {
     // 雷达定位轨迹opengl设置
     traj_newest_state_.reset(new ui::UiTrajectory(Vec3f(1.0, 0.0, 0.0)));  // 红色
     traj_scans_.reset(new ui::UiTrajectory(Vec3f(0.0, 1.0, 0.0)));         // 绿色
+    traj_lio_.reset(new ui::UiTrajectory(Vec3f(1.0, 1.0, 0.0)));
 
     current_scan_.reset(new PointCloudType);  // 重置pcl点云指针
     current_scan_ui_.reset(new ui::UiCloud);  // 重置用于渲染的点云指针
@@ -44,6 +45,7 @@ void PangolinWindowImpl::Reset(const std::vector<Keyframe::Ptr> &keyframes) {
     scans_.clear();
     current_scan_ui_ = nullptr;
     traj_scans_->Clear();
+    traj_lio_->Clear();
 
     for (const auto &keyframe : keyframes) {
         traj_scans_->AddPt(keyframe->GetOptLidarPose());
@@ -163,6 +165,17 @@ bool PangolinWindowImpl::UpdateCurrentScan() {
     return true;
 }
 
+bool PangolinWindowImpl::UpdateLioPose() {
+    if (!lio_pose_need_update_.load()) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mtx_nav_state_);
+    traj_lio_->AddPt(newest_lio_pose_);
+    lio_pose_need_update_.store(false);
+    return true;
+}
+
 bool PangolinWindowImpl::UpdateState() {
     if (!kf_result_need_update_.load()) {
         return false;
@@ -207,6 +220,7 @@ void PangolinWindowImpl::DrawAll() {
 
     if (draw_frontend_traj_) {
         traj_newest_state_->Render();
+        traj_lio_->Render();
         // 车
         frontend_car_.SetPose(newest_frontend_pose_);  // 车在current pose上
         frontend_car_.Render();
@@ -252,6 +266,7 @@ void PangolinWindowImpl::RenderClouds() {
     UpdateGlobalMap();
     UpdateDynamicMap();
     UpdateState();
+    UpdateLioPose();
     UpdateCurrentScan();
 
     // 绘制
@@ -418,7 +433,7 @@ void PangolinWindowImpl::AllocateBuffer() {
     std::string global_text(
         "Welcome to SAD.UI. Open source code: https://github.com/gaoxiang12/slam_in_autonomous_driving. All right "
         "reserved.\n"
-        "Red: newest IMU pose, yellow: lidar scan pose");
+        "Red: fused pose, Yellow: localization LIO pose, Green: lidar localization pose");
     auto &font = pangolin::default_font();
     gltext_label_global_ = font.Text(global_text);
 }

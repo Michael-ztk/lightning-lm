@@ -183,6 +183,10 @@ void Localization::LidarOdomProcCloud(CloudPtr cloud) {
 
     auto lo_state = lio_->GetState();
 
+    if (ui_) {
+        ui_->UpdateLioPose(lo_state.GetLidarPose());
+    }
+
     lidar_loc_->ProcessLO(lo_state);
     pgo_->ProcessLidarOdom(lo_state);
 

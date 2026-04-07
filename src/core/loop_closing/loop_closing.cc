@@ -194,7 +194,7 @@ void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
             }
 
             // 转到世界系下
-            SE3 Twb = kf->GetLIOLidarPose();
+            SE3 Twb = kf->GetOptLidarPose();
 
             if (!build_in_world) {
                 Twb = all_keyframes_.at(given_id)->GetOptLidarPose().inverse() * Twb;

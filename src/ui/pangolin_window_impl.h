@@ -69,10 +69,12 @@ class PangolinWindowImpl {
     std::atomic<bool> cloud_global_need_update_;   // 全局点云是否需要更新
     std::atomic<bool> cloud_dynamic_need_update_;  // 动态点云是否需要更新
     std::atomic<bool> kf_result_need_update_;      // 卡尔曼滤波结果
+    std::atomic<bool> lio_pose_need_update_;
     std::atomic<bool> current_scan_need_update_;   // 更新当前扫描
     std::atomic<bool> lidarloc_need_update_;       // 雷达位置？
 
     pcl::PointCloud<PointType>::Ptr current_scan_ = nullptr;  // 当前scan
+    SE3 newest_lio_pose_;
     SE3 newest_frontend_pose_;                                // 最新pose
     SE3 newest_backend_pose_;                                 // 最新pose
     SE3 current_scan_pose_;                                   // 当前scan对应的pose or Twb/Twi
@@ -110,6 +112,7 @@ class PangolinWindowImpl {
     bool UpdateGlobalMap();
     bool UpdateDynamicMap();
     bool UpdateState();
+    bool UpdateLioPose();
     bool UpdateCurrentScan();
 
     void RenderLabels();
@@ -150,6 +153,7 @@ class PangolinWindowImpl {
 
     // trajectory
     std::shared_ptr<ui::UiTrajectory> traj_scans_ = nullptr;         // 激光扫描的轨迹
+    std::shared_ptr<ui::UiTrajectory> traj_lio_ = nullptr;
     std::shared_ptr<ui::UiTrajectory> traj_newest_state_ = nullptr;  // 最新state的轨迹
 
     // 滤波器状态相关 Data logger object

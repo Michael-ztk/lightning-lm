@@ -14,7 +14,7 @@ fasterlio:
   time_scale: 1e-3             # 兼容不同数据集的时间单位，仅对Velodyne LiDAR(lidar_type=2)生效
 
   skip_lidar_num: 0 # 点云的跳帧情况
-  point_filter_num: 10 # 点云采样参数，影响关键帧->回环中源点云个数
+  point_filter_num: 4 # 点云采样参数，影响关键帧->回环中源点云个数
   max_iteration: 6 # 最大迭代次数
   filter_size_scan: 0.5 # 对scan进行的降采样
   filter_size_map: 0.5
@@ -35,8 +35,8 @@ fasterlio:
                  0, 1, 0,
                  0, 0, 1 ]
   keep_first_imu_estimation: false
-  kf_dis_th: 2.0
-  kf_angle_th: 15.0
+  kf_dis_th: 1.0
+  kf_angle_th: 10.0
 
 
 g2p5:
@@ -64,11 +64,11 @@ system:
   pub_tf: true
 
 loop_closing:
-  loop_kf_gap: 10       # 每隔多少个关键帧检查一次
-  min_id_interval: 20   # 被检查的关键帧ID间隔
-  closest_id_th: 50     # 历史关键帧与当前帧的ID间隔
-  max_range: 4.0       # 候选帧的最大距离
-  ndt_score_th: 1.0     # ndt位姿分值
+  loop_kf_gap: 20       # 每隔多少个关键帧检查一次
+  min_id_interval: 50   # 被检查的关键帧ID间隔
+  closest_id_th: 100     # 历史关键帧与当前帧的ID间隔
+  max_range: 2.0       # 候选帧的最大距离
+  ndt_score_th: 1.2     # ndt位姿分值
   source_submap_idx_range: 0 #单边范围
   source_submap_stride: 1 #步长
   with_height: false
@@ -85,11 +85,11 @@ lidar_loc:
   filter_z_min: -1.0
   force_2d: false
   grid_search_angle_range: 180.0
-  grid_search_angle_step: 60
+  grid_search_angle_step: 10
   lidar_loc_odom_th: 0.5
   init_with_fp: true
   min_init_confidence: 1.8
-  update_dynamic_cloud: true
+  update_dynamic_cloud: false
   update_err_h: 0.2
   update_err_v: 0.2
   update_kf_dis: 2.0

@@ -224,15 +224,15 @@ bool LaserMapping::Run() {
         return false;
     }
 
-    if (cur_pts < (scan_undistort_->size() * 0.1)) {
-        /// 降采样太狠了,有效点数不够，用
+    // if (cur_pts < (scan_undistort_->size() * 0.1)) {
+    //     /// 降采样太狠了,有效点数不够，用
 
-        auto v = voxel_scan_;
-        v.setLeafSize(0.1, 0.1, 0.1);
-        v.setInputCloud(scan_undistort_);
-        v.filter(*scan_down_body_);
-        cur_pts = scan_down_body_->size();
-    }
+    //     auto v = voxel_scan_;
+    //     v.setLeafSize(0.1, 0.1, 0.1);
+    //     v.setInputCloud(scan_undistort_);
+    //     v.filter(*scan_down_body_);
+    //     cur_pts = scan_down_body_->size();
+    // }
 
     scan_down_world_->resize(cur_pts);
     nearest_points_.resize(cur_pts);
