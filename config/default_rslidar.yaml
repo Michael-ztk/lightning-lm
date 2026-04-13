@@ -88,6 +88,9 @@ lidar_loc:
   grid_search_angle_step: 60
   lidar_loc_odom_th: 0.5
   init_with_fp: true
+  init_pose_enable: false
+  init_pose_trans: [0.0, 0.0, 0.0]
+  init_pose_yaw: 0.0
   min_init_confidence: 1.8
   update_dynamic_cloud: true
   update_err_h: 0.2

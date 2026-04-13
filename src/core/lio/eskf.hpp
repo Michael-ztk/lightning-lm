@@ -101,6 +101,11 @@ class ESKF {
     void ChangeP(const CovType& P) { P_ = P; }
     void ChangeStamp(const double& stamp) { stamp_ = stamp; }
 
+    void SetPose(const SE3& pose) {
+        x_.pos_ = pose.translation();
+        x_.rot_ = pose.so3();
+    }
+
     void SetUseAA(bool use_aa) { use_aa_ = use_aa; }
     void SetTime(double timestamp) { x_.timestamp_ = timestamp; }
 

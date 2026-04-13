@@ -63,6 +63,9 @@ class LidarLoc {
 
         double max_update_cache_dis_ = 30.0;  // 更新动态图层的缓冲距离
         std::string recover_pose_path_ = "./data/recover_pose.txt";
+
+        bool init_pose_enable_ = false;
+        SE3 init_pose_;
     };
 
     explicit LidarLoc(Options options = Options());
@@ -133,6 +136,9 @@ class LidarLoc {
 
     /// 激光定位是否认为LO有效
     bool LidarLocThinkLOReliable() { return lo_reliable_; }
+
+    bool GetInitPoseEnable() const { return options_.init_pose_enable_; }
+    SE3 GetInitPose() const { return options_.init_pose_; }
 
    private:
     // 内部函数  ==========================================================================

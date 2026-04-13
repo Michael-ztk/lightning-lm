@@ -56,6 +56,10 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
 
     lidar_loc_->Init(yaml_path);
 
+    if (lidar_loc_->GetInitPoseEnable()) {
+        lio_->SetPose(lidar_loc_->GetInitPose());
+    }
+
     /// pose graph
     pgo_ = std::make_shared<PGO>();
     pgo_->SetDebug(false);

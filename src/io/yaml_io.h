@@ -21,6 +21,9 @@ class YAML_IO {
 
     inline bool IsOpened() const { return is_opened_; }
 
+    inline YAML::Node& Node() { return yaml_node_; }
+    inline const YAML::Node& Node() const { return yaml_node_; }
+
     /// 保存文件，不指明路径时，覆盖原文件
     bool Save(const std::string &path = "");
 

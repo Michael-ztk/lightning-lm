@@ -74,6 +74,8 @@ class LaserMapping {
 
     void SetUI(std::shared_ptr<ui::PangolinWindow> ui) { ui_ = ui; }
 
+    void SetPose(const SE3& pose) { kf_.SetPose(pose); }
+
     /// 获取关键帧
     Keyframe::Ptr GetKeyframe() const { return last_kf_; }
 

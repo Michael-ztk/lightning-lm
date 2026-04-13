@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <execution>
 
+#include <Eigen/Dense>
 #include <pcl/common/transforms.h>
 #include <pcl/filters/passthrough.h>
 #include <pcl/io/pcd_io.h>
@@ -74,6 +75,25 @@ bool LidarLoc::Init(const std::string& config_path) {
     options_.with_height_ = yaml.GetValue<bool>("loop_closing", "with_height");
     options_.try_self_extrap_ = yaml.GetValue<bool>("lidar_loc", "try_self_extrap");
 
+    options_.init_pose_enable_ = false;
+    if (yaml.IsOpened()) {
+        try {
+            if (yaml.Node()["lidar_loc"] && yaml.Node()["lidar_loc"]["init_pose_enable"]) {
+                options_.init_pose_enable_ = yaml.Node()["lidar_loc"]["init_pose_enable"].as<bool>();
+            }
+        } catch (...) {
+            LOG(WARNING) << "failed to read init_pose_enable";
+        }
+    }
+    if (options_.init_pose_enable_) {
+        auto trans = yaml.Node()["lidar_loc"]["init_pose_trans"].as<std::vector<double>>();
+        double yaw = yaml.Node()["lidar_loc"]["init_pose_yaw"].as<double>();
+        Eigen::Vector3d t(trans[0], trans[1], trans[2]);
+        Sophus::SO3d R = Sophus::SO3d::exp(Eigen::Vector3d(0, 0, yaw));
+        options_.init_pose_ = SE3(R, t);
+        LOG(INFO) << "init pose from config: " << t.transpose() << " yaw: " << yaw;
+    }
+
     lidar_loc::grid_search_angle_step = yaml.GetValue<double>("lidar_loc", "grid_search_angle_step");
     lidar_loc::grid_search_angle_range = yaml.GetValue<double>("lidar_loc", "grid_search_angle_range");
 
@@ -119,6 +139,10 @@ bool LidarLoc::Init(const std::string& config_path) {
     }
 
     update_map_thread_ = std::thread([this]() { LidarLoc::UpdateMapThread(); });
+
+    if (options_.init_pose_enable_) {
+        SetInitialPose(options_.init_pose_);
+    }
 
     return true;
 }
