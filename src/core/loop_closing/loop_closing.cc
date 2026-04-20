@@ -221,19 +221,20 @@ void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
 
     /// 不同分辨率下的匹配
     CloudPtr output(new PointCloudType);
-    std::vector<double> res{10.0, 5.0, 2.0, 1.0};
+    std::vector<double> res{5.0, 2.0, 1.0};
 
     CloudPtr rough_map1, rough_map2;
 
     for (auto& r : res) {
         pcl::NormalDistributionsTransform<PointType, PointType> ndt;
         ndt.setTransformationEpsilon(0.05);
-        ndt.setStepSize(0.7);
+        ndt.setStepSize(r * 0.4);
         ndt.setMaximumIterations(40);
 
         ndt.setResolution(r);
-        rough_map1 = VoxelGrid(submap_kf1, r * 0.1);
-        rough_map2 = VoxelGrid(submap_kf2, r * 0.1);
+        double voxel_size = std::max(0.1, r * 0.15);
+        rough_map1 = VoxelGrid(submap_kf1, voxel_size);
+        rough_map2 = VoxelGrid(submap_kf2, voxel_size);
         ndt.setInputTarget(rough_map1);
         ndt.setInputSource(rough_map2);
 
@@ -256,10 +257,12 @@ void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
     // LOG(INFO) << "lc result " << c.idx1_ << " -> " << c.idx2_ << ": score=" << c.ndt_score_ << ", Tw2_t="
     //           << t.transpose() << ", Tij_t=" << c.Tij_.translation().transpose() << ", saved=" << prefix;
 
-    // pcl::io::savePCDFileBinaryCompressed(
-    //     "./data/lc_" + std::to_string(c.idx1_) + "_" + std::to_string(c.idx2_) + "_out.pcd", *output);
-    // pcl::io::savePCDFileBinaryCompressed(
-    //     "./data/lc_" + std::to_string(c.idx1_) + "_" + std::to_string(c.idx2_) + "_tgt.pcd", *rough_map1);
+    if (c.ndt_score_ > options_.ndt_score_th_) {
+        pcl::io::savePCDFileBinaryCompressed(
+            "./data/lc_" + std::to_string(c.idx1_) + "_" + std::to_string(c.idx2_) + "_out.pcd", *output);
+        pcl::io::savePCDFileBinaryCompressed(
+            "./data/lc_" + std::to_string(c.idx1_) + "_" + std::to_string(c.idx2_) + "_tgt.pcd", *rough_map1);
+    }
 }
 
 void LoopClosing::PoseOptimization() {
