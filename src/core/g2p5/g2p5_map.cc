@@ -143,7 +143,7 @@ void G2P5Map::UpdateCell(const Vec2i &point_index, const bool &if_hit, float hei
         return;
     }
 
-    grids_[xi][yi].SetGridHitPoint(if_hit, sub_index_i, sub_index_j, height);
+    grids_[xi][yi].SetGridHitPoint(if_hit, sub_index_i, sub_index_j, height, options_.max_miss_);
 }
 
 void G2P5Map::SetMissPoint(const float &point_x, const float &point_y, const float &laser_origin_x,
@@ -302,7 +302,43 @@ nav_msgs::msg::OccupancyGrid G2P5Map::ToROS() {
             }
         }
     }
+
+    if (options_.enable_outlier_filter_) {
+        FilterIsolatedObstacles(occu_map, options_.min_occupied_neighbors_);
+    }
+
     return occu_map;
+}
+
+void G2P5Map::FilterIsolatedObstacles(nav_msgs::msg::OccupancyGrid &map, int min_neighbors) {
+    int w = map.info.width;
+    int h = map.info.height;
+    std::vector<int8_t> filtered = map.data;
+
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            int idx = w * y + x;
+            if (map.data[idx] != 100) continue;
+
+            int count = 0;
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    if (dx == 0 && dy == 0) continue;
+                    int nx = x + dx, ny = y + dy;
+                    if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
+                        if (map.data[w * ny + nx] == 100) {
+                            count++;
+                        }
+                    }
+                }
+            }
+
+            if (count < min_neighbors) {
+                filtered[idx] = 0;
+            }
+        }
+    }
+    map.data = filtered;
 }
 
 cv::Mat G2P5Map::ToCV() {

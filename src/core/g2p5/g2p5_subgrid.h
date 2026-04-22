@@ -23,7 +23,7 @@ class SubGrid {
     SubGrid &operator=(const SubGrid &other);
 
     /// 设置某个网格的占据或者非占据
-    void SetGridHitPoint(bool hit, int sub_xi, int sub_yi, float height) {
+    void SetGridHitPoint(bool hit, int sub_xi, int sub_yi, float height, unsigned int max_miss = 20) {
         UL lock(data_mutex_);
         if (grid_data_ == nullptr) {
             MallocGrid();
@@ -36,19 +36,14 @@ class SubGrid {
             // 占据，黑色
             if (height < cell.height_) {
                 cell.height_ = height;
-                cell.hit_cnt_ += 1;
-                cell.visit_cnt_ += 1;
             }
+            cell.hit_cnt_ += 1;
+            cell.visit_cnt_ += 1;
         } else {
-            // 非占据，白色
-            if (cell.hit_cnt_ > 3) {
-                // 本身为黑色，黑色刷白有高度要求
-                if (height < cell.height_) {
-                    cell.visit_cnt_ += 1;
-                }
-            } else {
+            // 非占据，白色：限制对已确认障碍物的稀释
+            unsigned int miss_cnt = cell.visit_cnt_ - cell.hit_cnt_;
+            if (miss_cnt < max_miss) {
                 cell.visit_cnt_ += 1;
-                cell.height_ = height;
             }
         }
     }

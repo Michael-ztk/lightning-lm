@@ -56,6 +56,10 @@ class G2P5 {
         float usable_scan_range_ = 50.0;      // 用于计算栅格地图的最远障碍物距离
 
         double grid_map_resolution_ = 0.1;  // 栅格地图的分辨率，室外建议为0.1，室内可以用0.05
+        bool dense_ray_ = true;  // 是否使用逐点射线（高分辨率时需要开启，低分辨率时360射线即可）
+        unsigned int max_miss_ = 20;  // 每格子最大miss次数，值越小障碍物越难被清除，值越大噪点清除越彻底
+        int min_occupied_neighbors_ = 2;  // 离群点滤波阈值，3x3邻域内最少占据邻居数
+        bool enable_outlier_filter_ = true;  // 是否启用离群点滤波
 
         bool verbose_ = true;
     };

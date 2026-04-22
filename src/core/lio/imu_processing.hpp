@@ -149,7 +149,24 @@ inline void ImuProcess::IMUInit(const MeasureGroup &meas, ESKF &kf_state, int &N
 
     auto init_state = kf_state.GetX();
     init_state.timestamp_ = meas.imu_.back()->timestamp;
-    init_state.grav_ = S2(-mean_acc_ / mean_acc_.norm() * G_m_s2);
+    init_state.grav_ = S2(Vec3d(0, 0, -G_m_s2));
+
+    // 重力对齐：将 mean_acc_ 方向旋转到 (0,0,1)，使世界系 z 轴朝上
+    Vec3d z_body = mean_acc_.normalized();
+    Vec3d z_world(0, 0, 1);
+    Vec3d axis = z_body.cross(z_world);
+    double sin_angle = axis.norm();
+    double cos_angle = z_body.dot(z_world);
+    if (sin_angle > 1e-6) {
+        init_state.rot_ = SO3(Eigen::AngleAxisd(std::atan2(sin_angle, cos_angle), axis.normalized()).toRotationMatrix());
+    }
+    // sin_angle ≈ 0 时 body 已近似水平，rot_ 保持 Identity
+
+    LOG(INFO) << "IMU init: mean_acc = " << mean_acc_.transpose()
+              << ", grav = " << init_state.grav_.vec_.transpose()
+              << ", rot = " << init_state.rot_.log().transpose()
+              << ", acc_norm = " << mean_acc_.norm();
+    
     init_state.bg_ = mean_gyr_;
     init_state.offset_t_lidar_ = t_lidar_mu_;
     init_state.offset_R_lidar_ = R_lidar_imu_;

@@ -59,8 +59,8 @@ bool SlamSystem::Init(const std::string& yaml_path) {
         g2p5_->Init(yaml_path);
 
         if (options_.with_loop_closing_) {
-            /// 当发生回环时，触发一次重绘
-            lc_->SetLoopClosedCB([this]() { g2p5_->RedrawGlobalMap(); });
+            /// 栅格地图改为在 SaveMap 时统一生成，不再实时重绘
+            // lc_->SetLoopClosedCB([this]() { g2p5_->RedrawGlobalMap(); });
         }
 
         if (options_.with_2dvisualization_) {
@@ -188,6 +188,17 @@ void SlamSystem::SaveMap(const std::string& path) {
     // pcl::io::savePCDFileBinaryCompressed(save_path + "/global_raw.pcd", *global_map_raw);
 
     if (options_.with_gridmap_) {
+        /// 使用优化后的位姿重建栅格地图
+        g2p5_->RedrawGlobalMap();
+        /// 等待后端线程检测到 flag 并开始重建
+        while (!g2p5_->IsBusy()) {
+            usleep(100000);
+        }
+        /// 等待重建完成
+        while (g2p5_->IsBusy()) {
+            usleep(100000);
+        }
+
         /// 存为ROS兼容的模式
         auto map = g2p5_->GetNewestMap()->ToROS();
         const int width = map.info.width;
@@ -225,7 +236,7 @@ void SlamSystem::SaveMap(const std::string& path) {
             emitter << YAML::Key << "mode" << YAML::Value << "trinary";
             emitter << YAML::Key << "width" << YAML::Value << map.info.width;
             emitter << YAML::Key << "height" << YAML::Value << map.info.height;
-            emitter << YAML::Key << "resolution" << YAML::Value << float(0.05);
+            emitter << YAML::Key << "resolution" << YAML::Value << map.info.resolution;
             std::vector<double> orig{map.info.origin.position.x, map.info.origin.position.y, 0};
             emitter << YAML::Key << "origin" << YAML::Value << orig;
             emitter << YAML::Key << "negate" << YAML::Value << 0;

@@ -28,6 +28,9 @@ class G2P5Map {
     struct Options {
         float resolution_ = 0.05;      /// 子网格的最高分辨率
         float occupancy_ratio_ = 0.3;  // 占用比例
+        unsigned int max_miss_ = 20;   // 每格子最大miss次数
+        int min_occupied_neighbors_ = 2;  // 离群点滤波：3x3邻域内最少占据邻居数，低于此值视为噪点
+        bool enable_outlier_filter_ = true;  // 是否启用离群点滤波
     };
 
     G2P5Map(Options options) : options_(options) {
@@ -76,6 +79,9 @@ class G2P5Map {
     }
 
     void UpdateCell(const Vec2i &point_index, const bool &if_hit, float height);
+
+    /// 离群点滤波：移除3x3邻域内占据邻居不足的孤立障碍物
+    static void FilterIsolatedObstacles(nav_msgs::msg::OccupancyGrid &map, int min_neighbors);
 
     bool GetDataIndex(const float x, const float y, int &x_index, int &y_index);
 

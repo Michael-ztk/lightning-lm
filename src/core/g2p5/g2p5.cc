@@ -34,12 +34,6 @@ void G2P5::Quit() {
 void G2P5::PushKeyframe(Keyframe::Ptr kf) {
     UL lock(kf_mutex_);
     all_keyframes_.emplace_back(kf);
-
-    if (options_.online_mode_) {
-        draw_frontend_map_thread_.AddMessage(kf);
-    } else {
-        RenderFront(kf);
-    }
 }
 
 void G2P5::RenderFront(Keyframe::Ptr kf) {
@@ -51,7 +45,7 @@ void G2P5::RenderFront(Keyframe::Ptr kf) {
     {
         UL lock{newest_map_mutex_};
 
-        lightning::Timer::Evaluate([&]() { AddKfToMap({kf}, frontend_map_); }, "G2P5 Occupancy Mapping", true);
+        lightning::Timer::Evaluate([&]() { AddKfToMap({kf}, frontend_map_); }, "G2P5 Occupancy Mapping", false);
         newest_map_ = frontend_map_;
     }
 
@@ -92,12 +86,22 @@ void G2P5::RenderBack() {
 
         G2P5Map::Options opt;
         opt.resolution_ = options_.grid_map_resolution_;
+        opt.max_miss_ = options_.max_miss_;
+        opt.min_occupied_neighbors_ = options_.min_occupied_neighbors_;
+        opt.enable_outlier_filter_ = options_.enable_outlier_filter_;
         backend_map_ = std::make_shared<G2P5Map>(opt);
+
+        /// 一次性用全部关键帧计算完整边界并分配地图，避免多次 Resize 产生块对齐偏移
+        if (!ResizeMap(all_keyframes, backend_map_)) {
+            is_busy_ = false;
+            continue;
+        }
+
         auto cur_kf = all_keyframes.begin();
         bool abort = false;
 
         for (; cur_kf != all_keyframes.end(); ++cur_kf) {
-            AddKfToMap({*cur_kf}, backend_map_);
+            Convert3DTo2DScan(*cur_kf, backend_map_);
             if (backend_redraw_flag_) {
                 LOG(INFO) << "backend redraw triggered in process, abort";
                 abort = true;
@@ -118,29 +122,33 @@ void G2P5::RenderBack() {
 
         /// 绘制过程中前端可能发生了更新，要保证后端绘制和前端的一致性
         int cur_idx = all_keyframes.back()->GetID();
-        while (true) {
-            Keyframe::Ptr frontend_kf = nullptr;
-            {
-                UL lock(frontend_mutex_);
-                frontend_kf = frontend_current_;
-            }
+        {
+            UL lock(frontend_mutex_);
+            if (frontend_current_ != nullptr) {
+                while (true) {
+                    Keyframe::Ptr frontend_kf = nullptr;
+                    {
+                        frontend_kf = frontend_current_;
+                    }
 
-            if (cur_idx == frontend_kf->GetID()) {
-                break;
-            }
+                    if (cur_idx == frontend_kf->GetID()) {
+                        break;
+                    }
 
-            int frontend_idx = frontend_kf->GetID();
-            std::vector<Keyframe::Ptr> kfs;
+                    int frontend_idx = frontend_kf->GetID();
+                    std::vector<Keyframe::Ptr> kfs;
 
-            {
-                UL lock(kf_mutex_);
-                for (int i = cur_idx + 1; i <= frontend_idx; ++i) {
-                    kfs.emplace_back(all_keyframes_[i]);
+                    {
+                        UL lock2(kf_mutex_);
+                        for (int i = cur_idx + 1; i <= frontend_idx; ++i) {
+                            kfs.emplace_back(all_keyframes_[i]);
+                        }
+                    }
+
+                    AddKfToMap(kfs, backend_map_);
+                    cur_idx = frontend_idx;
                 }
             }
-
-            AddKfToMap(kfs, backend_map_);
-            cur_idx = frontend_idx;
         }
 
         {
@@ -285,119 +293,92 @@ void G2P5::Convert3DTo2DScan(Keyframe::Ptr kf, G2P5MapPtr &map) {
         floor_coeffs_ = Vec4d(0, 0, 1, -options_.default_floor_height_);
     }
 
-    // step 1. 计算每个方向上发出射线上的高度分布, // NOTE 转成整形的360度是有精度损失的
-    std::vector<std::map<double, double>> rays(360);               // map键值：距离-相对高度（以距离排序）
-    std::vector<Vec2d> angle_distance_height(360, Vec2d::Zero());  // 每个角度上的距离-高度值
-    std::vector<Vec3d> pts_3d;                                     /// 距离地面0.3 ～ 1.2米之间的点云，激光坐标系下
-
     SE3 Twb = kf->GetOptLidarPose();
+    Vec3d orig = Twb.translation();
 
     double min_th = options_.min_th_floor_;
     double max_th = options_.max_th_floor_;
 
-    /// 把激光系下的点云转到当前submap坐标系
     auto cloud = kf->GetCloud();
 
-    CloudPtr obstacle_cloud(new PointCloudType);
+    if (options_.dense_ray_) {
+        /// 逐点射线模式：高分辨率(<=0.1)时使用，覆盖密度高
+        /// max_miss 参数限制每个格子的最大miss次数，防止低矮障碍物被过度稀释
+        for (size_t i = 0; i < cloud->points.size(); ++i) {
+            const auto &pt = cloud->points[i];
+            if (quit_flag_) return;
 
-    /// 黑色点的处理方式：所有在障碍物范围内的都是黑色点
-    int cnt_valid = 0;
-    for (size_t i = 0; i < cloud->points.size(); ++i) {
-        const auto &pt = cloud->points[i];
-        if (quit_flag_) {
-            return;
-        }
+            Vec3d pc = Vec3d(pt.x, pt.y, pt.z);
+            Vec4d pn = Vec4d(pt.x, pt.y, pt.z, 1);
 
-        Vec3d pc = Vec3d(pt.x, pt.y, pt.z);
-        Vec4d pn = Vec4d(pt.x, pt.y, pt.z, 1);
+            Vec2d p = pc.head<2>();
+            double dis = p.norm();
+            if (dis > options_.usable_scan_range_ || dis <= 0.01) continue;
 
-        // 计算激光点所在角度方向以及高度
-        Vec2d p = pc.head<2>();
-        double dis = p.norm();
+            double dis_floor = pn.dot(floor_coeffs_);
 
-        if (dis > options_.usable_scan_range_) {
-            continue;
-        }
-
-        double dis_floor = pn.dot(floor_coeffs_);  /// 该点到地面的距离
-        double dangle = atan2(p[1], p[0]) * constant::kRAD2DEG;
-        int angle = int(round(dangle) + 360) % 360;
-
-        if (dis_floor > min_th) {
-            if (dis_floor < max_th) {
-                // 特别矮的和特别高的都不计入
-                pts_3d.emplace_back(pc);
-
-                rays[angle].insert({dis, dis_floor});
-
-                /// 设置黑点
+            if (dis_floor > min_th && dis_floor < max_th) {
                 Vec3d p_world = Twb * pc;
                 map->SetHitPoint(p_world[0], p_world[1], true, dis_floor);
-
-                cnt_valid++;
-
-                obstacle_cloud->points.push_back(pt);
+                map->SetMissPoint(p_world[0], p_world[1], orig[0], orig[1], dis_floor, options_.lidar_height_);
             }
-        } else if (dis_floor > -min_th) {
-            // 地面附近或者地面以下
-            rays[angle].insert({dis, dis_floor});
-            cnt_valid++;
         }
-    }
+    } else {
+        /// 360度射线模式：低分辨率(>=0.1)时使用，速度快
+        std::vector<std::map<double, double>> rays(360);
+        std::vector<Vec2d> angle_distance_height(360, Vec2d::Zero());
 
-    // if (options_.verbose_) {
-    //     obstacle_cloud->is_dense = false;
-    //     obstacle_cloud->height = 1;
-    //     obstacle_cloud->width = obstacle_cloud->size();
+        for (size_t i = 0; i < cloud->points.size(); ++i) {
+            const auto &pt = cloud->points[i];
+            if (quit_flag_) return;
 
-    //     pcl::io::savePCDFile("./data/obs.pcd", *obstacle_cloud);
-    // }
+            Vec3d pc = Vec3d(pt.x, pt.y, pt.z);
+            Vec4d pn = Vec4d(pt.x, pt.y, pt.z, 1);
 
-    // LOG(INFO) << "valid obs: " << cnt_valid << ", total: " << cloud->size();
+            Vec2d p = pc.head<2>();
+            double dis = p.norm();
+            if (dis > options_.usable_scan_range_ || dis <= 0.01) continue;
 
-    std::vector<double> floor_esti_data;  // 地面高度估计值
+            double dis_floor = pn.dot(floor_coeffs_);
+            double dangle = atan2(p[1], p[0]) * constant::kRAD2DEG;
+            int angle = int(round(dangle) + 360) % 360;
 
-    // step 2, 考察每个方向上的分布曲线
-    // 正常场景中，每个方向由较低高度开始（地面），转到较高的高度（物体）
-    // 如若不是，那么可能发生了遮挡或进入盲区
-    constexpr double default_ray_distance = -1;
-    const double floor_rh = floor_coeffs_[3];
-
-    for (int i = 0; i < 360; ++i) {
-        if (quit_flag_) {
-            return;
-        }
-
-        if (rays[i].size() < 2) {
-            // 该方向测量数据很少，在16线中是不太可能出现的（至少地面上应该有线），出现，则说明有严重遮挡或失效，认为该方向取一个默认的最小距离（车宽）
-            angle_distance_height[i] = Vec2d(default_ray_distance, floor_rh);
-            continue;
+            if (dis_floor > min_th && dis_floor < max_th) {
+                rays[angle].insert({dis, dis_floor});
+                Vec3d p_world = Twb * pc;
+                map->SetHitPoint(p_world[0], p_world[1], true, dis_floor);
+            } else if (dis_floor > -min_th) {
+                rays[angle].insert({dis, dis_floor});
+            }
         }
 
-        /// 取距离和高度
-        for (auto iter = rays[i].rbegin(); iter != rays[i].rend(); ++iter) {
-            if (iter->second < options_.min_th_floor_) {
-                angle_distance_height[i] = Vec2d(iter->first, iter->second);
+        const double floor_rh = floor_coeffs_[3];
+        for (int i = 0; i < 360; ++i) {
+            if (quit_flag_) return;
+            if (rays[i].size() < 2) {
+                angle_distance_height[i] = Vec2d(-1, floor_rh);
                 continue;
             }
-
-            auto next_iter = iter;
-            next_iter++;
-
-            if (next_iter != rays[i].rend()) {
-                if (iter->second > options_.min_th_floor_ && next_iter->second < options_.min_th_floor_) {
-                    // 当前点是障碍但下一个点不是
+            for (auto iter = rays[i].rbegin(); iter != rays[i].rend(); ++iter) {
+                if (iter->second < min_th) {
                     angle_distance_height[i] = Vec2d(iter->first, iter->second);
-                    break;
+                    continue;
                 }
-            } else {
-                angle_distance_height[i] = Vec2d(iter->first, iter->second);
+                auto next_iter = iter;
+                next_iter++;
+                if (next_iter != rays[i].rend()) {
+                    if (iter->second > min_th && next_iter->second < min_th) {
+                        angle_distance_height[i] = Vec2d(iter->first, iter->second);
+                        break;
+                    }
+                } else {
+                    angle_distance_height[i] = Vec2d(iter->first, iter->second);
+                }
             }
         }
-    }
 
-    // 以2D scan方式添加白色点
-    SetWhitePoints(angle_distance_height, kf, map);
+        SetWhitePoints(angle_distance_height, kf, map);
+    }
 }
 
 void G2P5::SetWhitePoints(const std::vector<Vec2d> &pt2d, Keyframe::Ptr kf, G2P5MapPtr &map) {
@@ -489,9 +470,22 @@ void G2P5::Init(std::string yaml_path) {
     options_.lidar_height_ = yaml["g2p5"]["lidar_height"].as<float>();
     options_.grid_map_resolution_ = yaml["g2p5"]["grid_map_resolution"].as<float>();
     options_.default_floor_height_ = yaml["g2p5"]["floor_height"].as<float>();
+    options_.dense_ray_ = (options_.grid_map_resolution_ < 0.2);
+    if (yaml["g2p5"]["max_miss"]) {
+        options_.max_miss_ = yaml["g2p5"]["max_miss"].as<unsigned int>();
+    }
+    if (yaml["g2p5"]["min_occupied_neighbors"]) {
+        options_.min_occupied_neighbors_ = yaml["g2p5"]["min_occupied_neighbors"].as<int>();
+    }
+    if (yaml["g2p5"]["enable_outlier_filter"]) {
+        options_.enable_outlier_filter_ = yaml["g2p5"]["enable_outlier_filter"].as<bool>();
+    }
 
     G2P5Map::Options opt;
     opt.resolution_ = options_.grid_map_resolution_;
+    opt.max_miss_ = options_.max_miss_;
+    opt.min_occupied_neighbors_ = options_.min_occupied_neighbors_;
+    opt.enable_outlier_filter_ = options_.enable_outlier_filter_;
     frontend_map_ = std::make_shared<G2P5Map>(opt);
 
     if (options_.online_mode_) {
