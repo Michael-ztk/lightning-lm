@@ -219,6 +219,14 @@ void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
 
     Mat4f Tw2 = kf2->GetOptLidarPose().matrix().cast<float>();
 
+    // 保存匹配前的源点云和目标点云（都变换到世界坐标系下，方便对比差距）
+    // CloudPtr src_in_world(new PointCloudType);
+    // pcl::transformPointCloud(*submap_kf2, *src_in_world, Tw2);
+    // pcl::io::savePCDFileBinaryCompressed(
+    //     "./data/lc_" + std::to_string(c.idx1_) + "_" + std::to_string(c.idx2_) + "_before_src.pcd", *src_in_world);
+    // pcl::io::savePCDFileBinaryCompressed(
+    //     "./data/lc_" + std::to_string(c.idx1_) + "_" + std::to_string(c.idx2_) + "_before_tgt.pcd", *submap_kf1);
+
     /// 不同分辨率下的匹配
     CloudPtr output(new PointCloudType);
     std::vector<double> res{5.0, 2.0, 1.0};
@@ -227,7 +235,7 @@ void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
 
     for (auto& r : res) {
         pcl::NormalDistributionsTransform<PointType, PointType> ndt;
-        ndt.setTransformationEpsilon(0.05);
+        ndt.setTransformationEpsilon(0.005);
         ndt.setStepSize(r * 0.4);
         ndt.setMaximumIterations(40);
 
