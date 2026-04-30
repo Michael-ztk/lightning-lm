@@ -752,14 +752,14 @@ CloudPtr LaserMapping::GetGlobalMap(bool use_lio_pose, bool use_voxel, float res
             drift_orthogonal_gravity = (delta - drift_along_gravity * gravity_axis).norm();
         }
 
-        LOG(INFO) << "lidar trajectory start: " << start_pos.transpose();
-        LOG(INFO) << "lidar trajectory end: " << end_pos.transpose();
-        LOG(INFO) << "lidar trajectory gravity axis: " << gravity_axis.transpose();
-        LOG(INFO) << "lidar trajectory drift along gravity: " << drift_along_gravity;
-        LOG(INFO) << "lidar trajectory drift orthogonal gravity: " << drift_orthogonal_gravity;
+        // LOG(INFO) << "lidar trajectory start: " << start_pos.transpose();
+        // LOG(INFO) << "lidar trajectory end: " << end_pos.transpose();
+        // LOG(INFO) << "lidar trajectory gravity axis: " << gravity_axis.transpose();
+        // LOG(INFO) << "lidar trajectory drift along gravity: " << drift_along_gravity;
+        // LOG(INFO) << "lidar trajectory drift orthogonal gravity: " << drift_orthogonal_gravity;
     }
 
-    LOG(INFO) << "global map: " << global_map_filtered->size();
+    // LOG(INFO) << "global map: " << global_map_filtered->size();
 
     return global_map_filtered;
 }

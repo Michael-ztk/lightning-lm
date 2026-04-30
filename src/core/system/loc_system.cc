@@ -7,6 +7,10 @@
 #include "io/yaml_io.h"
 #include "wrapper/ros_utils.h"
 
+#include <pcl/io/pcd_io.h>
+#include <pcl/filters/voxel_grid.h>
+#include <pcl_conversions/pcl_conversions.h>
+
 namespace lightning {
 
 LocSystem::LocSystem(LocSystem::Options options) : options_(options) {
@@ -19,6 +23,7 @@ LocSystem::~LocSystem() { loc_->Finish(); }
 bool LocSystem::Init(const std::string &yaml_path) {
     loc::Localization::Options opt;
     opt.online_mode_ = true;
+    opt.pub_realtime_map_ = options_.pub_realtime_map_;
     loc_ = std::make_shared<loc::Localization>(opt);
 
     YAML_IO yaml(yaml_path);
@@ -61,15 +66,68 @@ bool LocSystem::Init(const std::string &yaml_path) {
             Timer::Evaluate([&]() { ProcessLidar(cloud); }, "Proc Lidar", false);
         });
 
+    initial_pose_sub_ = node_->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
+        "/initialpose", qos, [this](geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr pose_msg) {
+            Eigen::Vector3d position(pose_msg->pose.pose.position.x, pose_msg->pose.pose.position.y,
+                                     pose_msg->pose.pose.position.z);
+
+            Eigen::Quaterniond quaternion(pose_msg->pose.pose.orientation.w, pose_msg->pose.pose.orientation.x,
+                                          pose_msg->pose.pose.orientation.y, pose_msg->pose.pose.orientation.z);
+
+            SE3 init_pose(quaternion, position);
+
+            LOG(INFO) << "Received initial pose from rviz2: pos=" << position.transpose()
+                      << ", quat=" << quaternion.coeffs().transpose();
+
+            SetInitPose(init_pose);
+        });
+
     if (options_.pub_tf_) {
         tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(node_);
         loc_->SetTFCallback(
             [this](const geometry_msgs::msg::TransformStamped &pose) { tf_broadcaster_->sendTransform(pose); });
     }
 
+    if (options_.pub_realtime_map_) {
+        realtime_static_map_pub_ =
+            node_->create_publisher<sensor_msgs::msg::PointCloud2>("lightning/real_static_map", 1);
+        dynamic_map_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>("lightning/dynamic_map", 1);
+    }
+
+    if (options_.pub_static_pcd_) {
+        rclcpp::QoS latching_qos(1);
+        latching_qos.transient_local();
+        static_map_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>("lightning/static_map", latching_qos);
+    }
+
+    registered_scan_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>("registered_scan", 1);
+
+    if (options_.pub_realtime_map_) {
+        loc_->SetMapPublishCallback(
+            [this](const sensor_msgs::msg::PointCloud2& static_map,
+                   const sensor_msgs::msg::PointCloud2& dynamic_map) {
+                if (realtime_static_map_pub_ && !static_map.data.empty()) {
+                    realtime_static_map_pub_->publish(static_map);
+                }
+                if (dynamic_map_pub_ && !dynamic_map.data.empty()) {
+                    dynamic_map_pub_->publish(dynamic_map);
+                }
+            });
+    }
+
+    loc_->SetRegisteredScanCallback([this](const sensor_msgs::msg::PointCloud2& registered_scan) {
+        if (registered_scan_pub_ && !registered_scan.data.empty()) {
+            registered_scan_pub_->publish(registered_scan);
+        }
+    });
+
     bool ret = loc_->Init(yaml_path, map_path);
     if (ret) {
         LOG(INFO) << "online loc node has been created.";
+
+        if (options_.pub_static_pcd_ && static_map_pub_) {
+            PublishStaticPCD();
+        }
     }
 
     return ret;
@@ -98,6 +156,45 @@ void LocSystem::ProcessLidar(const sensor_msgs::msg::PointCloud2::SharedPtr &clo
 void LocSystem::ProcessLidar(const livox_ros_driver2::msg::CustomMsg::SharedPtr &cloud) {
     if (loc_started_) {
         loc_->ProcessLivoxLidarMsg(cloud);
+    }
+}
+
+void LocSystem::PublishStaticPCD() {
+    try {
+        CloudPtr global_map(new PointCloudType);
+        if (pcl::io::loadPCDFile<PointType>(options_.global_pcd_path_, *global_map) == -1) {
+            LOG(ERROR) << "Failed to load global PCD file: " << options_.global_pcd_path_;
+            return;
+        }
+
+        if (global_map->empty()) {
+            LOG(WARNING) << "Global PCD file is empty: " << options_.global_pcd_path_;
+            return;
+        }
+
+        CloudPtr filtered_map(new PointCloudType);
+        pcl::VoxelGrid<PointType> voxel;
+        constexpr float kStaticMapPublishLeafSize = 0.2f;
+        voxel.setLeafSize(kStaticMapPublishLeafSize, kStaticMapPublishLeafSize, kStaticMapPublishLeafSize);
+        voxel.setInputCloud(global_map);
+        voxel.filter(*filtered_map);
+
+        if (filtered_map->empty()) {
+            LOG(WARNING) << "Filtered static PCD map is empty: " << options_.global_pcd_path_;
+            return;
+        }
+
+        sensor_msgs::msg::PointCloud2 static_map_msg;
+        pcl::toROSMsg(*filtered_map, static_map_msg);
+        static_map_msg.header.frame_id = "map";
+        static_map_msg.header.stamp = node_->now();
+
+        static_map_pub_->publish(static_map_msg);
+
+        LOG(INFO) << "Published filtered static PCD map with " << filtered_map->size() << "/" << global_map->size()
+                  << " points from: " << options_.global_pcd_path_;
+    } catch (const std::exception& e) {
+        LOG(ERROR) << "Exception while publishing static PCD: " << e.what();
     }
 }
 

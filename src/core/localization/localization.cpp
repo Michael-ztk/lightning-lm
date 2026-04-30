@@ -1,5 +1,6 @@
 #include <pcl/common/transforms.h>
 #include <pcl_conversions/pcl_conversions.h>
+#include <rclcpp/clock.hpp>
 
 #include <chrono>
 #include <thread>
@@ -43,6 +44,22 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
     lidar_loc_options.map_option_.enable_dynamic_polygon_ = false;
     lidar_loc_options.map_option_.map_path_ = global_map_path;
     lidar_loc_ = std::make_shared<LidarLoc>(lidar_loc_options);
+
+    if (options_.pub_realtime_map_) {
+        lidar_loc_->SetMapPublishCallback(
+            [this](const sensor_msgs::msg::PointCloud2& static_map,
+                   const sensor_msgs::msg::PointCloud2& dynamic_map) {
+                if (map_publish_callback_) {
+                    map_publish_callback_(static_map, dynamic_map);
+                }
+            });
+    }
+
+    lidar_loc_->SetRegisteredScanCallback([this](const sensor_msgs::msg::PointCloud2& registered_scan) {
+        if (registered_scan_callback_) {
+            registered_scan_callback_(registered_scan);
+        }
+    });
 
     if (options_.with_ui_) {
         ui_ = std::make_shared<ui::PangolinWindow>();
@@ -235,7 +252,18 @@ void Localization::LidarLocProcCloud(CloudPtr scan_undist) {
     auto res = lidar_loc_->GetLocalizationResult();
     pgo_->ProcessLidarLoc(res);
 
-    if (ui_) {
+    if (registered_scan_callback_ && res.lidar_loc_valid_) {
+        CloudPtr aligned_cloud(new PointCloudType);
+        pcl::transformPointCloud(*scan_undist, *aligned_cloud, res.pose_.matrix());
+
+        sensor_msgs::msg::PointCloud2 cloud_msg;
+        pcl::toROSMsg(*aligned_cloud, cloud_msg);
+        cloud_msg.header.frame_id = "map";
+        cloud_msg.header.stamp = rclcpp::Clock().now();
+        registered_scan_callback_(cloud_msg);
+    }
+
+    if (ui_ && res.lidar_loc_valid_) {
         // Twi with Til, here pose means Twl, thus Til=I
         ui_->UpdateScan(scan_undist, res.pose_);
     }
@@ -351,5 +379,13 @@ void Localization::SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vec
 }
 
 void Localization::SetTFCallback(Localization::TFCallback&& callback) { tf_callback_ = callback; }
+
+void Localization::SetMapPublishCallback(Localization::MapPublishCallback&& callback) {
+    map_publish_callback_ = callback;
+}
+
+void Localization::SetRegisteredScanCallback(Localization::RegisteredScanCallback&& callback) {
+    registered_scan_callback_ = callback;
+}
 
 }  // namespace lightning::loc

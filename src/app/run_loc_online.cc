@@ -30,7 +30,7 @@ int main(int argc, char** argv) {
     }
 
     /// 默认起点开始定位
-    loc.SetInitPose(SE3());
+    // loc.SetInitPose(SE3());
     loc.Spin();
 
     rclcpp::shutdown();

@@ -6,6 +6,7 @@
 #define LIGHTNING_LOC_SYSTEM_H
 
 #include <tf2_ros/transform_broadcaster.h>
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -26,6 +27,9 @@ class LocSystem {
    public:
     struct Options {
         bool pub_tf_ = true;  // 是否发布tf
+        bool pub_realtime_map_ = false;  // 是否发布实时地图（动态和静态）
+        bool pub_static_pcd_ = true;     // 是否发布global.pcd作为静态地图
+        std::string global_pcd_path_ = "./data/new_map/global.pcd";  // global.pcd路径
     };
 
     explicit LocSystem(Options options);
@@ -48,6 +52,10 @@ class LocSystem {
     void Spin();
 
    private:
+    /// 发布静态PCD地图
+    void PublishStaticPCD();
+
+   private:
     Options options_;
 
     std::shared_ptr<loc::Localization> loc_ = nullptr;  // 定位接口
@@ -67,6 +75,13 @@ class LocSystem {
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_ = nullptr;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_ = nullptr;
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr livox_sub_ = nullptr;
+    rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initial_pose_sub_ = nullptr;
+
+    /// Map publishers for visualization
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr realtime_static_map_pub_ = nullptr;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr static_map_pub_ = nullptr;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr dynamic_map_pub_ = nullptr;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr registered_scan_pub_ = nullptr;
 };
 
 };  // namespace lightning

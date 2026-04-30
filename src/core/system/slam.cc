@@ -10,8 +10,13 @@
 #include "ui/pangolin_window.h"
 #include "wrapper/ros_utils.h"
 
+#include <pcl/common/transforms.h>
+#include <pcl/filters/voxel_grid.h>
+#include <pcl_conversions/pcl_conversions.h>
 #include <yaml-cpp/yaml.h>
+#include <chrono>
 #include <filesystem>
+#include <geometry_msgs/msg/transform_stamped.hpp>
 #include <opencv2/opencv.hpp>
 
 namespace lightning {
@@ -41,6 +46,19 @@ bool SlamSystem::Init(const std::string& yaml_path) {
         options.online_mode_ = options_.online_mode_;
         lc_ = std::make_shared<LoopClosing>(options);
         lc_->Init(yaml_path);
+        lc_->SetLoopClosedCB([this]() {
+            if (global_map_pub_) {
+                auto global_map = lio_->GetGlobalMap(!options_.with_loop_closing_, true, 0.3);
+                if (global_map) {
+                    UL lock(viz_publish_mutex_);
+                    global_map_cache_ = global_map;
+                    global_map_cache_seq_++;
+                }
+                force_global_map_publish_.store(true);
+            }
+
+            /// 栅格地图保持当前工程策略：SaveMap 时统一重建，不在回环时实时重绘。
+        });
     }
 
     if (options_.with_visualization_) {
@@ -57,11 +75,6 @@ bool SlamSystem::Init(const std::string& yaml_path) {
 
         g2p5_ = std::make_shared<g2p5::G2P5>(opt);
         g2p5_->Init(yaml_path);
-
-        if (options_.with_loop_closing_) {
-            /// 栅格地图改为在 SaveMap 时统一生成，不再实时重绘
-            // lc_->SetLoopClosedCB([this]() { g2p5_->RedrawGlobalMap(); });
-        }
 
         if (options_.with_2dvisualization_) {
             g2p5_->SetMapUpdateCallback([this](g2p5::G2P5MapPtr map) {
@@ -114,12 +127,25 @@ bool SlamSystem::Init(const std::string& yaml_path) {
 
         livox_sub_ = node_->create_subscription<livox_ros_driver2::msg::CustomMsg>(
             livox_topic_, qos, [this](livox_ros_driver2::msg::CustomMsg ::SharedPtr cloud) {
-                Timer::Evaluate([&]() { ProcessLidar(cloud); }, "Proc Lidar", true);
+                Timer::Evaluate([&]() { ProcessLidar(cloud); }, "Proc Lidar", false);
             });
 
         savemap_service_ = node_->create_service<SaveMapService>(
             "lightning/save_map", [this](const SaveMapService::Request::SharedPtr& req,
                                          SaveMapService::Response::SharedPtr res) { SaveMap(req, res); });
+
+        if (yaml["system"]["publish_map_to_rviz"].as<bool>(false)) {
+            map_publish_interval_ = yaml["system"]["map_publish_interval"].as<double>(1.0);
+            global_map_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>("lightning/global_map", qos);
+            LOG(INFO) << "global map publisher created, topic: lightning/global_map, interval: "
+                      << map_publish_interval_ << "s";
+        }
+
+        tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(node_);
+
+        if (yaml["system"]["pub_registered_scan"].as<bool>(false)) {
+            registered_scan_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>("registered_scan", qos);
+        }
 
         LOG(INFO) << "online slam node has been created.";
     }
@@ -128,6 +154,11 @@ bool SlamSystem::Init(const std::string& yaml_path) {
 }
 
 SlamSystem::~SlamSystem() {
+    stop_viz_publish_thread_ = true;
+    if (viz_publish_thread_.joinable()) {
+        viz_publish_thread_.join();
+    }
+
     if (ui_) {
         ui_->Quit();
     }
@@ -293,6 +324,8 @@ void SlamSystem::ProcessLidar(const sensor_msgs::msg::PointCloud2::SharedPtr& cl
     if (ui_) {
         ui_->UpdateKF(cur_kf_);
     }
+
+    UpdateVisualizationCaches();
 }
 
 void SlamSystem::ProcessLidar(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) {
@@ -325,11 +358,151 @@ void SlamSystem::ProcessLidar(const livox_ros_driver2::msg::CustomMsg::SharedPtr
     if (ui_) {
         ui_->UpdateKF(cur_kf_);
     }
+
+    UpdateVisualizationCaches();
+}
+
+void SlamSystem::UpdateVisualizationCaches() {
+    latest_kf_id_for_viz_.store(cur_kf_->GetID());
+    has_kf_for_viz_.store(true);
+
+    const SE3 body_pose = options_.with_loop_closing_ ? cur_kf_->GetOptBodyPose() : cur_kf_->GetLIOBodyPose();
+    const SE3 lidar_pose = options_.with_loop_closing_ ? cur_kf_->GetOptLidarPose() : cur_kf_->GetLIOLidarPose();
+
+    if (tf_broadcaster_) {
+        geometry_msgs::msg::TransformStamped t;
+        t.header.stamp = node_->now();
+        t.header.frame_id = "map";
+        t.child_frame_id = "body";
+        t.transform.translation.x = body_pose.translation()(0);
+        t.transform.translation.y = body_pose.translation()(1);
+        t.transform.translation.z = body_pose.translation()(2);
+        const auto q = body_pose.unit_quaternion();
+        t.transform.rotation.x = q.x();
+        t.transform.rotation.y = q.y();
+        t.transform.rotation.z = q.z();
+        t.transform.rotation.w = q.w();
+        tf_broadcaster_->sendTransform(t);
+    }
+
+    if (registered_scan_pub_) {
+        auto scan = lio_->GetScanUndist();
+        if (scan && scan->size() > 0) {
+            CloudPtr scan_copy(new PointCloudType(*scan));
+            UL lock(viz_publish_mutex_);
+            latest_registered_scan_ = scan_copy;
+            latest_registered_scan_pose_ = lidar_pose;
+            latest_registered_scan_seq_++;
+        }
+    }
+
+    if (global_map_pub_) {
+        CloudPtr cloud = cur_kf_->GetCloud();
+        if (cloud && cloud->size() > 0) {
+            pcl::VoxelGrid<PointType> voxel;
+            voxel.setLeafSize(1.0f, 1.0f, 1.0f);
+
+            CloudPtr cloud_filter(new PointCloudType);
+            voxel.setInputCloud(cloud);
+            voxel.filter(*cloud_filter);
+
+            CloudPtr cloud_trans(new PointCloudType);
+            pcl::transformPointCloud(*cloud_filter, *cloud_trans, lidar_pose.matrix());
+            cloud_trans->is_dense = false;
+            cloud_trans->height = 1;
+            cloud_trans->width = cloud_trans->size();
+
+            UL lock(viz_publish_mutex_);
+            *global_map_cache_ += *cloud_trans;
+            global_map_cache_->is_dense = false;
+            global_map_cache_->height = 1;
+            global_map_cache_->width = global_map_cache_->size();
+            global_map_cache_seq_++;
+        }
+    }
+}
+
+void SlamSystem::PublishVisualizationLoop() {
+    rclcpp::Rate loop_rate(20);
+    auto last_map_publish_time = std::chrono::steady_clock::now();
+    unsigned long last_published_kf_id = 0;
+    uint64_t last_registered_scan_seq = 0;
+    uint64_t last_global_map_seq = 0;
+
+    while (rclcpp::ok() && !debug::flg_exit && !stop_viz_publish_thread_) {
+        if (registered_scan_pub_) {
+            CloudPtr scan_copy = nullptr;
+            SE3 scan_pose;
+            uint64_t scan_seq = 0;
+            {
+                UL lock(viz_publish_mutex_);
+                if (latest_registered_scan_seq_ > last_registered_scan_seq && latest_registered_scan_ != nullptr) {
+                    scan_copy = latest_registered_scan_;
+                    scan_pose = latest_registered_scan_pose_;
+                    scan_seq = latest_registered_scan_seq_;
+                }
+            }
+
+            if (scan_copy) {
+                CloudPtr aligned(new PointCloudType);
+                pcl::transformPointCloud(*scan_copy, *aligned, scan_pose.matrix());
+                sensor_msgs::msg::PointCloud2 msg;
+                pcl::toROSMsg(*aligned, msg);
+                msg.header.stamp = node_->now();
+                msg.header.frame_id = "map";
+                registered_scan_pub_->publish(msg);
+                last_registered_scan_seq = scan_seq;
+            }
+        }
+
+        if (global_map_pub_ && has_kf_for_viz_.load()) {
+            const auto now = std::chrono::steady_clock::now();
+            const auto elapsed = std::chrono::duration<double>(now - last_map_publish_time).count();
+            const unsigned long latest_kf_id = latest_kf_id_for_viz_.load();
+            const bool force_publish = force_global_map_publish_.load();
+            CloudPtr global_map = nullptr;
+            uint64_t global_map_seq = 0;
+
+            {
+                UL lock(viz_publish_mutex_);
+                global_map_seq = global_map_cache_seq_;
+                if ((force_publish || global_map_seq != last_global_map_seq) && global_map_cache_ &&
+                    global_map_cache_->size() > 0) {
+                    global_map.reset(new PointCloudType(*global_map_cache_));
+                }
+            }
+
+            if ((force_publish || elapsed >= map_publish_interval_) && global_map &&
+                (force_publish || latest_kf_id != last_published_kf_id)) {
+                sensor_msgs::msg::PointCloud2 cloud_msg;
+                pcl::toROSMsg(*global_map, cloud_msg);
+                cloud_msg.header.stamp = node_->now();
+                cloud_msg.header.frame_id = "map";
+                global_map_pub_->publish(cloud_msg);
+                last_published_kf_id = latest_kf_id;
+                last_global_map_seq = global_map_seq;
+                last_map_publish_time = now;
+                force_global_map_publish_.store(false);
+            }
+        }
+
+        loop_rate.sleep();
+    }
 }
 
 void SlamSystem::Spin() {
     if (options_.online_mode_ && node_ != nullptr) {
+        if ((global_map_pub_ || registered_scan_pub_) && !viz_publish_thread_.joinable()) {
+            stop_viz_publish_thread_ = false;
+            viz_publish_thread_ = std::thread([this]() { PublishVisualizationLoop(); });
+        }
+
         spin(node_);
+
+        stop_viz_publish_thread_ = true;
+        if (viz_publish_thread_.joinable()) {
+            viz_publish_thread_.join();
+        }
     }
 }
 

@@ -84,7 +84,7 @@ void LoopClosing::HandleKF(Keyframe::Ptr kf) {
     DetectLoopCandidates();
 
     if (options_.verbose_) {
-        LOG(INFO) << "lc: get kf " << cur_kf_->GetID() << " candi: " << candidates_.size();
+        // LOG(INFO) << "lc: get kf " << cur_kf_->GetID() << " candi: " << candidates_.size();
     }
 
     // 计算回环位姿
@@ -108,7 +108,7 @@ void LoopClosing::DetectLoopCandidates() {
     }
 
     if (last_loop_kf_ && (cur_kf_->GetID() - last_loop_kf_->GetID()) <= options_.loop_kf_gap_) {
-        LOG(INFO) << "skip because last loop kf: " << last_loop_kf_->GetID();
+        // LOG(INFO) << "skip because last loop kf: " << last_loop_kf_->GetID();
         return;
     }
 

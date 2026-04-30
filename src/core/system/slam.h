@@ -8,7 +8,12 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <tf2_ros/transform_broadcaster.h>
+#include <atomic>
+#include <cstdint>
+#include <mutex>
 #include <string>
+#include <thread>
 
 #include "lightning/srv/save_map.hpp"
 #include "livox_ros_driver2/msg/custom_msg.hpp"
@@ -77,6 +82,9 @@ class SlamSystem {
     void WaitForUIExit();
 
    private:
+    void PublishVisualizationLoop();
+    void UpdateVisualizationCaches();
+
     /// ros端保存地图的实现
     void SaveMap(const SaveMapService::Request::SharedPtr request, SaveMapService::Response::SharedPtr response);
 
@@ -104,6 +112,24 @@ class SlamSystem {
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_ = nullptr;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_ = nullptr;
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr livox_sub_ = nullptr;
+
+    /// 点云发布到RViz
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr global_map_pub_ = nullptr;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr registered_scan_pub_ = nullptr;
+    std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_ = nullptr;
+    double map_publish_interval_ = 1.0;
+
+    std::thread viz_publish_thread_;
+    std::atomic_bool stop_viz_publish_thread_ = false;
+    std::atomic_bool force_global_map_publish_ = false;
+    std::mutex viz_publish_mutex_;
+    CloudPtr latest_registered_scan_ = nullptr;
+    SE3 latest_registered_scan_pose_;
+    uint64_t latest_registered_scan_seq_ = 0;
+    CloudPtr global_map_cache_{new PointCloudType()};
+    uint64_t global_map_cache_seq_ = 0;
+    std::atomic_ulong latest_kf_id_for_viz_{0};
+    std::atomic_bool has_kf_for_viz_ = false;
 };
 }  // namespace lightning
 

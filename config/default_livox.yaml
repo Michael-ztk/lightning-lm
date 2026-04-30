@@ -52,10 +52,13 @@ g2p5:
 
 system:
   with_loop_closing: true # 是否需要回环检测
-  with_ui: true # 是否需要3D UI
+  with_ui: false # 是否需要3D UI
   with_2dui: false # 是否需要2D UI
   with_g2p5: true # 是否需要栅格地图
   step_on_kf: false # 是否在关键帧处暂停
+  publish_map_to_rviz: true # 是否发布地图到RViz
+  map_publish_interval: 1.0 # 地图发布间隔(秒)
+  pub_registered_scan: true # 发布对齐后的当前帧点云
 
   enable_lidar_loc_skip: false
   enable_lidar_loc_rviz: false
@@ -91,8 +94,8 @@ lidar_loc:
   grid_search_angle_step: 10
   lidar_loc_odom_th: 0.5
   init_with_fp: false
-  init_pose_enable: true
-  init_pose_trans: [23.0, -3.0, 0.0]
+  init_pose_enable: false
+  init_pose_trans: [0.0, -0.0, 0.0]
   init_pose_yaw: 0.0
   min_init_confidence: 1.8
   update_dynamic_cloud: false
