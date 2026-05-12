@@ -31,7 +31,7 @@ LidarLoc::LidarLoc(LidarLoc::Options options) : options_(options) {
     pcl_ndt_->setNumThreads(4);
 
     pcl_ndt_rough_.reset(new NDTType());
-    pcl_ndt_rough_->setResolution(5.0);
+    pcl_ndt_rough_->setResolution(2.0);
     pcl_ndt_rough_->setNeighborhoodSearchMethod(pclomp::DIRECT7);
     pcl_ndt_rough_->setStepSize(0.1);
     pcl_ndt_rough_->setMaximumIterations(4);
@@ -98,6 +98,8 @@ bool LidarLoc::Init(const std::string& config_path) {
 
     lidar_loc::grid_search_angle_step = yaml.GetValue<double>("lidar_loc", "grid_search_angle_step");
     lidar_loc::grid_search_angle_range = yaml.GetValue<double>("lidar_loc", "grid_search_angle_range");
+    lidar_loc::grid_search_xy_range = yaml.GetValue<double>("lidar_loc", "grid_search_xy_range");
+    lidar_loc::grid_search_xy_step = yaml.GetValue<double>("lidar_loc", "grid_search_xy_step");
 
     LOG(INFO) << "min init confidence: " << options_.min_init_confidence_;
 
@@ -248,47 +250,65 @@ bool LidarLoc::YawSearch(SE3& pose, double& confidence, CloudPtr input, CloudPtr
     SE3 init_pose = pose;
     auto RPYXYZ = math::SE3ToRollPitchYaw(init_pose);
     double init_yaw = RPYXYZ.yaw;
+    double init_x = RPYXYZ.x;
+    double init_y = RPYXYZ.y;
 
     confidence = 0;
     bool yaw_search_success = false;
 
-    int step = lidar_loc::grid_search_angle_step;
+    int angle_step = lidar_loc::grid_search_angle_step;
     double radius = lidar_loc::grid_search_angle_range * constant::kDEG2RAD;
-    double angle_search_step = 2 * radius / step;
+    double angle_search_step = 2 * radius / angle_step;
 
-    std::vector<double> searched_yaw;
-    std::vector<double> scores(step);
-    std::vector<int> index;
-    std::vector<SE3> pose_opti(step);
+    double xy_range = lidar_loc::grid_search_xy_range;
+    double xy_step_size = lidar_loc::grid_search_xy_step;
+    int xy_steps = static_cast<int>(2 * xy_range / xy_step_size) + 1;
+    int total_candidates = angle_step * xy_steps * xy_steps;
 
-    for (int i = 0; i < step; ++i) {
-        double search_yaw = init_yaw + i * angle_search_step - radius;
-        searched_yaw.emplace_back(search_yaw);
-        index.emplace_back(i);
+    LOG(INFO) << "init yaw: " << init_yaw << ", p: " << RPYXYZ.pitch << ", ro: " << RPYXYZ.roll
+              << ", angle steps: " << angle_step
+              << ", xy search: " << xy_steps << " x " << xy_steps
+              << ", total candidates: " << total_candidates
+              << ", pose: " << init_x << " " << init_y;
+
+    SE3 best_pose = pose;
+    double best_score = 0;
+
+    for (int ai = 0; ai < angle_step; ++ai) {
+        double search_yaw = init_yaw + ai * angle_search_step - radius;
+
+        for (int xi = 0; xi < xy_steps; ++xi) {
+            for (int yi = 0; yi < xy_steps; ++yi) {
+                double dx = -xy_range + xi * xy_step_size;
+                double dy = -xy_range + yi * xy_step_size;
+
+                auto rpyxyz = RPYXYZ;
+                rpyxyz.yaw = search_yaw;
+                rpyxyz.x = init_x + dx;
+                rpyxyz.y = init_y + dy;
+                SE3 pose_esti = math::XYZRPYToSE3(rpyxyz);
+
+                double fitness_score = 0;
+                // 粗匹配
+                Localize(pose_esti, fitness_score, input, output, true);
+
+                if (fitness_score > best_score) {
+                    best_score = fitness_score;
+                    best_pose = pose_esti;
+                }
+            }
+        }
     }
 
-    LOG(INFO) << "init yaw: " << init_yaw << ", p: " << RPYXYZ.pitch << ", ro: " << RPYXYZ.roll << ", search from "
-              << searched_yaw.front() << " to " << searched_yaw.back();
+    confidence = best_score;
+    pose = best_pose;
 
-    /// 粗分辨率
-    std::for_each(index.begin(), index.end(), [&](int i) {
-        double fitness_score = 0;
-        RPYXYZ.yaw = searched_yaw[i];
-        SE3 pose_esti = math::XYZRPYToSE3(RPYXYZ);
+    LOG(INFO) << "grid search best score: " << confidence
+              << ", pose: " << pose.translation().x() << " " << pose.translation().y()
+              << ", yaw: " << atan2(pose.rotationMatrix()(1, 0), pose.rotationMatrix()(0, 0));
 
-        Localize(pose_esti, fitness_score, input, output, true);
-
-        scores[i] = fitness_score;
-        pose_opti[i] = pose_esti;
-    });
-
-    // find best match
-    auto best_score_idx = std::max_element(scores.begin(), scores.end()) - scores.begin();
-    confidence = scores.at(best_score_idx);
-    pose = pose_opti.at(best_score_idx);
-
-    /// 高分辨率
-    if (confidence > options_.min_init_confidence_) {
+    if (confidence > options_.min_init_confidence_ && output != nullptr) {
+        // 精匹配
         Localize(pose, confidence, input, output, false);
     }
 
@@ -401,7 +421,7 @@ bool LidarLoc::UpdateGlobalMap() {
 
     if (!loc_inited_) {
         NDTType::Ptr ndt_rough(new NDTType());
-        ndt_rough->setResolution(5.0);
+        ndt_rough->setResolution(2.0);
         ndt_rough->setNeighborhoodSearchMethod(pclomp::DIRECT7);
         ndt_rough->setStepSize(0.1);
         ndt_rough->setMaximumIterations(4);
@@ -872,7 +892,9 @@ bool LidarLoc::Localize(SE3& pose, double& confidence, CloudPtr input, CloudPtr 
     bool loc_success = false;
     Eigen::Matrix4f guess_pose = pose.matrix().cast<float>();
 
-    LOG(INFO) << "loc from: " << pose.translation().transpose();
+    if (loc_inited_) {
+        LOG(INFO) << "loc from: " << pose.translation().transpose() << ", confidence: " << confidence;
+    }
 
     if (pcl_ndt_->getInputTarget() == nullptr) {
         LOG(INFO) << "lidar loc target is null, skip";
@@ -930,7 +952,9 @@ bool LidarLoc::Localize(SE3& pose, double& confidence, CloudPtr input, CloudPtr 
     q_3d.normalize();
     pose = SE3(q_3d, t_3d);
 
-    LOG(INFO) << "confidence: " << confidence << ", t: " << t_3d.transpose() << ", succ: " << loc_success;
+    if (loc_inited_) {
+        LOG(INFO) << "confidence: " << confidence << ", t: " << t_3d.transpose() << ", succ: " << loc_success;
+    }
 
     return loc_success;
 }
