@@ -46,7 +46,7 @@ g2p5:
   min_th_floor: 0.1  # 距离地面这个高度的障碍物被扫入栅格地图中
   max_th_floor: 1.0  # 距离地面这个高度的障碍物被扫入栅格地图中
   grid_map_resolution: 0.05 # 栅格地图分辨率
-  max_miss: 20 # 每格子最大miss次数，值越小障碍物越难被清除，值越大噪点清除越彻底，最好是分辨率增大倍数的3倍左右
+  max_miss: 30 # 每格子最大miss次数，值越小障碍物越难被清除，值越大噪点清除越彻底，最好是分辨率增大倍数的3倍左右
   enable_outlier_filter: true # 是否启用离群点滤波
   min_occupied_neighbors: 1 # 离群点滤波阈值，3x3邻域内占据邻居少于此值的障碍物被视为噪点清除
 
@@ -89,10 +89,12 @@ lidar_loc:
   force_2d: false
   grid_search_angle_range: 180.0
   grid_search_angle_step: 10
+  grid_search_xy_range: 2.0
+  grid_search_xy_step: 1.0
   lidar_loc_odom_th: 0.5
   init_with_fp: false
   init_pose_enable: true
-  init_pose_trans: [23.0, -3.0, 0.0]
+  init_pose_trans: [4.0, 0.0, 0.0]
   init_pose_yaw: 0.0
   min_init_confidence: 1.8
   update_dynamic_cloud: false
