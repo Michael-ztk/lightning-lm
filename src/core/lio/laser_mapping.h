@@ -98,7 +98,10 @@ class LaserMapping {
     /// 获取最新的点云
     CloudPtr GetRecentCloud();
 
-    std::vector<Keyframe::Ptr> GetAllKeyframes() { return all_keyframes_; }
+    std::vector<Keyframe::Ptr> GetAllKeyframes() {
+        UL lock(mtx_keyframes_);
+        return all_keyframes_;
+    }
 
     /**
      * 计算全局地图
@@ -151,6 +154,7 @@ class LaserMapping {
     std::vector<Keyframe::Ptr> all_keyframes_;
     Keyframe::Ptr last_kf_ = nullptr;
     int kf_id_ = 0;
+    std::mutex mtx_keyframes_;
 
     /// point clouds data
     CloudPtr scan_undistort_{new PointCloudType()};   // scan after undistortion

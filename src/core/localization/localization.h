@@ -29,7 +29,6 @@ class Localization {
 
         bool online_mode_ = false;  // 在线模式还是离线模式
         bool with_ui_ = false;      // 是否带ui
-        bool pub_realtime_map_ = false;  // 是否发布实时地图
 
         /// 参数
         SE3 T_body_lidar_;
@@ -82,13 +81,9 @@ class Localization {
     using LocStateCallback = std::function<void(const std_msgs::msg::Int32& state)>;
     using PointcloudBodyCallback = std::function<void(const sensor_msgs::msg::PointCloud2& pointcloud)>;
     using PointcloudWorldCallback = std::function<void(const sensor_msgs::msg::PointCloud2& pointcloud)>;
-    using MapPublishCallback =
-        std::function<void(const sensor_msgs::msg::PointCloud2& static_map,
-                           const sensor_msgs::msg::PointCloud2& dynamic_map)>;
     using RegisteredScanCallback = std::function<void(const sensor_msgs::msg::PointCloud2& registered_scan)>;
 
     void SetTFCallback(TFCallback&& callback);
-    void SetMapPublishCallback(MapPublishCallback&& callback);
     void SetRegisteredScanCallback(RegisteredScanCallback&& callback);
 
     // void SetPathCallback(std::function<void(const nav_msgs::msg::Path& path)>&& callback);
@@ -130,7 +125,6 @@ class Localization {
     LocStateCallback loc_state_callback_;
     PointcloudBodyCallback pointcloud_body_callback_;
     PointcloudWorldCallback pointcloud_world_callback_;
-    MapPublishCallback map_publish_callback_;
     RegisteredScanCallback registered_scan_callback_;
 
     /// 输入检查

@@ -329,6 +329,7 @@ void LaserMapping::MakeKF() {
     //           << std::setprecision(14) << state_point_.timestamp_;
 
     if (options_.is_in_slam_mode_) {
+        UL lock(mtx_keyframes_);
         all_keyframes_.emplace_back(kf);
     }
 
@@ -369,8 +370,8 @@ void LaserMapping::ProcessPointCloud2(const livox_ros_driver2::msg::CustomMsg::S
             scan_count_++;
             double timestamp = ToSec(msg->header.stamp);
             if (timestamp < last_timestamp_lidar_) {
-                LOG(ERROR) << "lidar loop back, clear buffer";
-                lidar_buffer_.clear();
+                LOG(ERROR) << "lidar loop back, dt: " << timestamp - last_timestamp_lidar_;
+                return;
             }
 
             // LOG(INFO) << "get cloud at " << std::setprecision(14) << timestamp
@@ -394,8 +395,8 @@ void LaserMapping::ProcessPointCloud2(CloudPtr cloud) {
 
             double timestamp = math::ToSec(cloud->header.stamp);
             if (timestamp < last_timestamp_lidar_) {
-                LOG(ERROR) << "lidar loop back, clear buffer";
-                lidar_buffer_.clear();
+                LOG(ERROR) << "lidar loop back, dt: " << timestamp - last_timestamp_lidar_;
+                return;
             }
 
             lidar_buffer_.push_back(cloud);
@@ -691,14 +692,19 @@ void LaserMapping::ObsModel(NavState &s, ESKF::CustomObservationModel &obs) {
 
 CloudPtr LaserMapping::GetGlobalMap(bool use_lio_pose, bool use_voxel, float res) {
     CloudPtr global_map(new PointCloudType);
+    std::vector<Keyframe::Ptr> keyframes;
+    {
+        UL lock(mtx_keyframes_);
+        keyframes = all_keyframes_;
+    }
 
-    pcl::VoxelGrid<PointType> voxel;
-    voxel.setLeafSize(res, res, res);
-
-    for (auto &kf : all_keyframes_) {
+    for (const auto& kf : keyframes) {
         CloudPtr cloud = kf->GetCloud();
 
         CloudPtr cloud_filter(new PointCloudType);
+
+        pcl::VoxelGrid<PointType> voxel;
+        voxel.setLeafSize(res, res, res);
 
         if (use_voxel) {
             voxel.setInputCloud(cloud);
@@ -722,6 +728,8 @@ CloudPtr LaserMapping::GetGlobalMap(bool use_lio_pose, bool use_voxel, float res
     }
 
     CloudPtr global_map_filtered(new PointCloudType);
+    pcl::VoxelGrid<PointType> voxel;
+    voxel.setLeafSize(res, res, res);
     if (use_voxel) {
         voxel.setInputCloud(global_map);
         voxel.filter(*global_map_filtered);

@@ -461,46 +461,6 @@ void LidarLoc::UpdateMapThread() {
                 ui_->UpdatePointCloudDynamic(map_->GetDynamicCloud());
             }
 
-            if (map_publish_callback_) {
-                const auto static_cloud_chunks = map_->GetStaticCloud();
-                const auto dynamic_cloud_chunks = map_->GetDynamicCloud();
-
-                sensor_msgs::msg::PointCloud2 static_msg;
-                sensor_msgs::msg::PointCloud2 dynamic_msg;
-
-                if (!static_cloud_chunks.empty()) {
-                    CloudPtr merged_static(new PointCloudType);
-                    for (const auto& chunk : static_cloud_chunks) {
-                        if (chunk.second && !chunk.second->empty()) {
-                            *merged_static += *chunk.second;
-                        }
-                    }
-
-                    if (!merged_static->empty()) {
-                        pcl::toROSMsg(*merged_static, static_msg);
-                        static_msg.header.frame_id = "map";
-                        static_msg.header.stamp = rclcpp::Clock().now();
-                    }
-                }
-
-                if (!dynamic_cloud_chunks.empty()) {
-                    CloudPtr merged_dynamic(new PointCloudType);
-                    for (const auto& chunk : dynamic_cloud_chunks) {
-                        if (chunk.second && !chunk.second->empty()) {
-                            *merged_dynamic += *chunk.second;
-                        }
-                    }
-
-                    if (!merged_dynamic->empty()) {
-                        pcl::toROSMsg(*merged_dynamic, dynamic_msg);
-                        dynamic_msg.header.frame_id = "map";
-                        dynamic_msg.header.stamp = rclcpp::Clock().now();
-                    }
-                }
-
-                map_publish_callback_(static_msg, dynamic_msg);
-            }
-
             map_->CleanMapUpdate();
         }
         usleep(10000);

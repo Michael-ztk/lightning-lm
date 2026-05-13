@@ -123,12 +123,6 @@ class LidarLoc {
     /// 设置UI
     void SetUI(std::shared_ptr<ui::PangolinWindow> ui) { ui_ = ui; }
 
-    /// 设置地图发布回调
-    using MapPublishCallback =
-        std::function<void(const sensor_msgs::msg::PointCloud2& static_map,
-                           const sensor_msgs::msg::PointCloud2& dynamic_map)>;
-    void SetMapPublishCallback(MapPublishCallback&& callback) { map_publish_callback_ = callback; }
-
     /// 设置当前帧点云发布回调
     using RegisteredScanCallback = std::function<void(const sensor_msgs::msg::PointCloud2& registered_scan)>;
     void SetRegisteredScanCallback(RegisteredScanCallback&& callback) { registered_scan_callback_ = callback; }
@@ -277,9 +271,6 @@ class LidarLoc {
     double map_height_ = 0;
 
     bool has_set_pose_ = false;  // 外部set_pose标志位，若存在则本次动态图层不落盘
-
-    /// 地图发布回调
-    MapPublishCallback map_publish_callback_;
 
     /// 当前帧点云发布回调
     RegisteredScanCallback registered_scan_callback_;

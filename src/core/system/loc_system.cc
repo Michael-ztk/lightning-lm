@@ -23,7 +23,6 @@ LocSystem::~LocSystem() { loc_->Finish(); }
 bool LocSystem::Init(const std::string &yaml_path) {
     loc::Localization::Options opt;
     opt.online_mode_ = true;
-    opt.pub_realtime_map_ = options_.pub_realtime_map_;
     loc_ = std::make_shared<loc::Localization>(opt);
 
     YAML_IO yaml(yaml_path);
@@ -88,12 +87,6 @@ bool LocSystem::Init(const std::string &yaml_path) {
             [this](const geometry_msgs::msg::TransformStamped &pose) { tf_broadcaster_->sendTransform(pose); });
     }
 
-    if (options_.pub_realtime_map_) {
-        realtime_static_map_pub_ =
-            node_->create_publisher<sensor_msgs::msg::PointCloud2>("lightning/real_static_map", 1);
-        dynamic_map_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>("lightning/dynamic_map", 1);
-    }
-
     if (options_.pub_static_pcd_) {
         rclcpp::QoS latching_qos(1);
         latching_qos.transient_local();
@@ -101,20 +94,6 @@ bool LocSystem::Init(const std::string &yaml_path) {
     }
 
     registered_scan_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>("registered_scan", 1);
-
-    if (options_.pub_realtime_map_) {
-        loc_->SetMapPublishCallback(
-            [this](const sensor_msgs::msg::PointCloud2& static_map,
-                   const sensor_msgs::msg::PointCloud2& dynamic_map) {
-                if (realtime_static_map_pub_ && !static_map.data.empty()) {
-                    realtime_static_map_pub_->publish(static_map);
-                }
-                if (dynamic_map_pub_ && !dynamic_map.data.empty()) {
-                    dynamic_map_pub_->publish(dynamic_map);
-                }
-            });
-    }
-
     loc_->SetRegisteredScanCallback([this](const sensor_msgs::msg::PointCloud2& registered_scan) {
         if (registered_scan_pub_ && !registered_scan.data.empty()) {
             registered_scan_pub_->publish(registered_scan);
@@ -172,12 +151,7 @@ void LocSystem::PublishStaticPCD() {
             return;
         }
 
-        CloudPtr filtered_map(new PointCloudType);
-        pcl::VoxelGrid<PointType> voxel;
-        constexpr float kStaticMapPublishLeafSize = 0.2f;
-        voxel.setLeafSize(kStaticMapPublishLeafSize, kStaticMapPublishLeafSize, kStaticMapPublishLeafSize);
-        voxel.setInputCloud(global_map);
-        voxel.filter(*filtered_map);
+        CloudPtr filtered_map = math::VoxelGrid(global_map, 0.2);
 
         if (filtered_map->empty()) {
             LOG(WARNING) << "Filtered static PCD map is empty: " << options_.global_pcd_path_;

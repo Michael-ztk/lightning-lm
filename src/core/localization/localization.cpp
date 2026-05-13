@@ -44,17 +44,8 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
     lidar_loc_options.map_option_.enable_dynamic_polygon_ = false;
     lidar_loc_options.map_option_.map_path_ = global_map_path;
     lidar_loc_ = std::make_shared<LidarLoc>(lidar_loc_options);
-
-    if (options_.pub_realtime_map_) {
-        lidar_loc_->SetMapPublishCallback(
-            [this](const sensor_msgs::msg::PointCloud2& static_map,
-                   const sensor_msgs::msg::PointCloud2& dynamic_map) {
-                if (map_publish_callback_) {
-                    map_publish_callback_(static_map, dynamic_map);
-                }
-            });
-    }
-
+    
+    // Set registered scan publish callback to lidar_loc
     lidar_loc_->SetRegisteredScanCallback([this](const sensor_msgs::msg::PointCloud2& registered_scan) {
         if (registered_scan_callback_) {
             registered_scan_callback_(registered_scan);
@@ -380,12 +371,7 @@ void Localization::SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vec
 
 void Localization::SetTFCallback(Localization::TFCallback&& callback) { tf_callback_ = callback; }
 
-void Localization::SetMapPublishCallback(Localization::MapPublishCallback&& callback) {
-    map_publish_callback_ = callback;
-}
+void Localization::SetRegisteredScanCallback(Localization::RegisteredScanCallback&& callback) { registered_scan_callback_ = callback; }
 
-void Localization::SetRegisteredScanCallback(Localization::RegisteredScanCallback&& callback) {
-    registered_scan_callback_ = callback;
-}
 
 }  // namespace lightning::loc

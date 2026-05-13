@@ -27,8 +27,7 @@ class LocSystem {
    public:
     struct Options {
         bool pub_tf_ = true;  // 是否发布tf
-        bool pub_realtime_map_ = false;  // 是否发布实时地图（动态和静态）
-        bool pub_static_pcd_ = true;     // 是否发布global.pcd作为静态地图
+        bool pub_static_pcd_ = true;  // 是否发布global.pcd作为静态地图
         std::string global_pcd_path_ = "./data/new_map/global.pcd";  // global.pcd路径
     };
 
@@ -78,9 +77,7 @@ class LocSystem {
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initial_pose_sub_ = nullptr;
 
     /// Map publishers for visualization
-    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr realtime_static_map_pub_ = nullptr;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr static_map_pub_ = nullptr;
-    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr dynamic_map_pub_ = nullptr;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr registered_scan_pub_ = nullptr;
 };
 

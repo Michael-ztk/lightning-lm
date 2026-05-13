@@ -118,6 +118,8 @@ class SlamSystem {
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr registered_scan_pub_ = nullptr;
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_ = nullptr;
     double map_publish_interval_ = 1.0;
+    const size_t max_viz_points_ = 1000000;
+    const float viz_voxel_size_ = 0.2f;
 
     std::thread viz_publish_thread_;
     std::atomic_bool stop_viz_publish_thread_ = false;
@@ -128,6 +130,7 @@ class SlamSystem {
     uint64_t latest_registered_scan_seq_ = 0;
     CloudPtr global_map_cache_{new PointCloudType()};
     uint64_t global_map_cache_seq_ = 0;
+    bool global_map_needs_full_replace_ = false;
     std::atomic_ulong latest_kf_id_for_viz_{0};
     std::atomic_bool has_kf_for_viz_ = false;
 };
