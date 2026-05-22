@@ -335,9 +335,9 @@ void LoopClosing::PoseOptimization() {
         return;
     }
 
-    // if (candidates_.empty()) {
-    //     return;
-    // }
+    if (candidates_.empty()) {
+        return;
+    }
 
     optimizer_->InitializeOptimization();
     optimizer_->SetVerbose(false);

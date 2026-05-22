@@ -103,7 +103,7 @@ void G2P5::RenderBack() {
         for (; cur_kf != all_keyframes.end(); ++cur_kf) {
             Convert3DTo2DScan(*cur_kf, backend_map_);
             if (backend_redraw_flag_) {
-                LOG(INFO) << "backend redraw triggered in process, abort";
+                // LOG(INFO) << "backend redraw triggered in process, abort";
                 abort = true;
                 break;
             }

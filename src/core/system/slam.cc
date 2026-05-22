@@ -325,7 +325,14 @@ void SlamSystem::ProcessLidar(const sensor_msgs::msg::PointCloud2::SharedPtr& cl
     }
 
     lio_->ProcessPointCloud2(cloud);
-    lio_->Run();
+    if (!lio_->Run()) {
+        return;
+    }
+
+    auto state = lio_->GetState();
+    if (state.pose_is_ok_) {
+        PublishTF(state.GetPose());
+    }
 
     auto kf = lio_->GetKeyframe();
     if (kf != cur_kf_) {
@@ -359,7 +366,14 @@ void SlamSystem::ProcessLidar(const livox_ros_driver2::msg::CustomMsg::SharedPtr
     }
 
     lio_->ProcessPointCloud2(cloud);
-    lio_->Run();
+    if (!lio_->Run()) {
+        return;
+    }
+
+    auto state = lio_->GetState();
+    if (state.pose_is_ok_) {
+        PublishTF(state.GetPose());
+    }
 
     auto kf = lio_->GetKeyframe();
     if (kf != cur_kf_) {
@@ -387,12 +401,7 @@ void SlamSystem::ProcessLidar(const livox_ros_driver2::msg::CustomMsg::SharedPtr
     UpdateVisualizationCaches();
 }
 
-void SlamSystem::UpdateVisualizationCaches() {
-    latest_kf_id_for_viz_.store(cur_kf_->GetID());
-    has_kf_for_viz_.store(true);
-
-    const SE3 pose = options_.with_loop_closing_ ? cur_kf_->GetOptBodyPose() : cur_kf_->GetLIOBodyPose();
-
+void SlamSystem::PublishTF(const SE3& pose) {
     if (tf_broadcaster_) {
         geometry_msgs::msg::TransformStamped t;
         t.header.stamp = node_->now();
@@ -408,6 +417,13 @@ void SlamSystem::UpdateVisualizationCaches() {
         t.transform.rotation.w = q.w();
         tf_broadcaster_->sendTransform(t);
     }
+}
+
+void SlamSystem::UpdateVisualizationCaches() {
+    latest_kf_id_for_viz_.store(cur_kf_->GetID());
+    has_kf_for_viz_.store(true);
+
+    const SE3 pose = options_.with_loop_closing_ ? cur_kf_->GetOptBodyPose() : cur_kf_->GetLIOBodyPose();
 
     if (registered_scan_pub_ && registered_scan_pub_->get_subscription_count() > 0) {
         auto scan = lio_->GetScanUndist();

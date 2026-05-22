@@ -82,6 +82,7 @@ class SlamSystem {
     void WaitForUIExit();
 
    private:
+    void PublishTF(const SE3& pose);
     void PublishVisualizationLoop();
     void UpdateVisualizationCaches();
 
