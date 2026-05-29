@@ -52,6 +52,15 @@ target_link_libraries(run_loc_online
         ${third_party_libs}
 )
 
+add_executable(run_lightning
+        run_lightning.cc
+)
+
+target_link_libraries(run_lightning
+        ${PROJECT_NAME}.libs
+        ${third_party_libs}
+)
+
 add_executable(test_ui
         test_ui.cc
 )
@@ -61,5 +70,5 @@ target_link_libraries(test_ui
         ${third_party_libs}
 )
 
-install(TARGETS run_slam_offline run_slam_online run_loc_offline run_loc_online
+install(TARGETS run_slam_offline run_slam_online run_loc_offline run_loc_online run_lightning
         DESTINATION lib/${PROJECT_NAME})

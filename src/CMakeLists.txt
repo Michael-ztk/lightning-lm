@@ -40,6 +40,7 @@ add_library(${PROJECT_NAME}.libs SHARED
 
         core/system/slam.cc
         core/system/loc_system.cc
+        core/system/lightning_system.cc
 
         wrapper/bag_io.cc
 )
