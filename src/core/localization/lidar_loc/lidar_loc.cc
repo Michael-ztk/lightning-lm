@@ -423,7 +423,7 @@ bool LidarLoc::UpdateGlobalMap() {
         NDTType::Ptr ndt_rough(new NDTType());
         ndt_rough->setResolution(2.0);
         ndt_rough->setNeighborhoodSearchMethod(pclomp::DIRECT7);
-        ndt_rough->setStepSize(0.1);
+        ndt_rough->setStepSize(0.4);
         ndt_rough->setMaximumIterations(4);
         ndt_rough->setNumThreads(4);
 
