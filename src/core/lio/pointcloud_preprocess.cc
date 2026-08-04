@@ -25,6 +25,10 @@ void PointCloudPreprocess::Process(const sensor_msgs::msg::PointCloud2 ::SharedP
             RobosenseHandler(msg);
             break;
 
+        case LidarType::HESAI:
+            HesaiHandler(msg);
+            break;
+
         default:
             LOG(ERROR) << "Error LiDAR Type";
             break;
@@ -260,6 +264,55 @@ void PointCloudPreprocess::RobosenseHandler(const sensor_msgs::msg::PointCloud2:
             const auto &ori_point = pl_orig.points[i];
             push_point(ori_point, (ori_point.timestamp - start_time) * 1e3);
         }
+    }
+
+    cloud_out_.width = cloud_out_.size();
+    cloud_out_.height = 1;
+    cloud_out_.is_dense = false;
+}
+
+void PointCloudPreprocess::HesaiHandler(const sensor_msgs::msg::PointCloud2::SharedPtr &msg) {
+    cloud_out_.clear();
+    cloud_full_.clear();
+
+    pcl::PointCloud<hesai_ros::Point> pl_orig;
+    pcl::fromROSMsg(*msg, pl_orig);
+
+    const int plsize = pl_orig.size();
+    if (plsize == 0) {
+        cloud_out_.width = 0;
+        cloud_out_.height = 1;
+        cloud_out_.is_dense = false;
+        return;
+    }
+
+    const int estimated_size = plsize / point_filter_num_ + 1;
+    cloud_out_.reserve(estimated_size);
+
+    // Hesai 雷达的 timestamp 是每帧第一个点的绝对时间（秒）
+    const double time_begin = pl_orig.points[0].timestamp;
+
+    // 使用传感器时间戳作为点云时间基准
+    cloud_out_.header.stamp = static_cast<uint64_t>(time_begin * 1e9);
+
+    const double blind_sq = blind_ * blind_;
+
+    for (int i = 0; i < plsize; i += point_filter_num_) {
+        const auto &pt = pl_orig.points[i];
+
+        const double range_sq = pt.x * pt.x + pt.y * pt.y + pt.z * pt.z;
+        if (range_sq < blind_sq) {
+            continue;
+        }
+
+        PointType added_pt;
+        added_pt.x = pt.x;
+        added_pt.y = pt.y;
+        added_pt.z = pt.z;
+        added_pt.intensity = pt.intensity;
+        added_pt.time = (pt.timestamp - time_begin) * 1000.0;
+
+        cloud_out_.points.push_back(added_pt);
     }
 
     cloud_out_.width = cloud_out_.size();

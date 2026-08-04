@@ -92,6 +92,9 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
     } else if (lidar_type == 4) {
         preprocess_->SetLidarType(LidarType::ROBOSENSE);
         LOG(INFO) << "Using RoboSense Lidar";
+    } else if (lidar_type == 5) {
+        preprocess_->SetLidarType(LidarType::HESAI);
+        LOG(INFO) << "Using Hesai Lidar";
     } else {
         LOG(WARNING) << "unknown lidar_type";
         return false;
@@ -344,17 +347,19 @@ void LaserMapping::ProcessPointCloud2(const sensor_msgs::msg::PointCloud2::Share
     Timer::Evaluate(
         [&, this]() {
             scan_count_++;
-            double timestamp = ToSec(msg->header.stamp);
+
+            CloudPtr cloud(new PointCloudType());
+            preprocess_->Process(msg, cloud);
+
+            // 优先使用雷达预处理设置的传感器时间戳（如Hesai），否则回退到ROS header时间戳
+            double timestamp = cloud->header.stamp != 0
+                                   ? double(cloud->header.stamp) * 1e-9
+                                   : ToSec(msg->header.stamp);
+
             if (timestamp < last_timestamp_lidar_) {
                 LOG(ERROR) << "lidar loop back, dt: " << timestamp - last_timestamp_lidar_;
                 return;
             }
-
-            LOG(INFO) << "get cloud at " << std::setprecision(14) << timestamp
-                      << ", latest imu: " << last_timestamp_imu_;
-
-            CloudPtr cloud(new PointCloudType());
-            preprocess_->Process(msg, cloud);
 
             lidar_buffer_.push_back(cloud);
             time_buffer_.push_back(timestamp);
@@ -436,7 +441,7 @@ bool LaserMapping::SyncPackages() {
             }
         }
 
-        lo::lidar_time_interval = lidar_mean_scantime_;
+        lo::lidar_time_interval = lidar_mean_scantime_ * 1.1;
 
         // LOG(INFO) << "recompute lidar end time: " << std::setprecision(14) << lidar_end_time_;
         measures_.lidar_end_time_ = lidar_end_time_;

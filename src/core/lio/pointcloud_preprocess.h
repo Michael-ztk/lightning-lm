@@ -12,7 +12,7 @@
 
 namespace lightning {
 
-enum class LidarType { AVIA = 1, VELO32, OUST64, ROBOSENSE };
+enum class LidarType { AVIA = 1, VELO32, OUST64, ROBOSENSE, HESAI };
 
 /**
  * point cloud preprocess
@@ -52,6 +52,7 @@ class PointCloudPreprocess {
     void Oust64Handler(const sensor_msgs::msg::PointCloud2 ::SharedPtr &msg);
     void VelodyneHandler(const sensor_msgs::msg::PointCloud2 ::SharedPtr &msg);
     void RobosenseHandler(const sensor_msgs::msg::PointCloud2::SharedPtr &msg);
+    void HesaiHandler(const sensor_msgs::msg::PointCloud2::SharedPtr &msg);
 
     PointCloudType cloud_full_, cloud_out_;
 

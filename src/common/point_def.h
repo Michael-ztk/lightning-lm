@@ -66,10 +66,25 @@ struct EIGEN_ALIGN16 Point {
 };
 }
 
+namespace hesai_ros {
+struct EIGEN_ALIGN16 Point {
+    PCL_ADD_POINT4D
+    float intensity;
+    double timestamp;
+    uint16_t ring;
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+};
+}
+
 // clang-format off
 POINT_CLOUD_REGISTER_POINT_STRUCT(robosense_ros::Point,
     (float, x, x) (float, y, y) (float, z, z) (float, intensity, intensity)
     (uint16_t, ring, ring) (double, timestamp, timestamp)
+)
+
+POINT_CLOUD_REGISTER_POINT_STRUCT(hesai_ros::Point,
+    (float, x, x) (float, y, y) (float, z, z) (float, intensity, intensity)
+    (double, timestamp, timestamp) (uint16_t, ring, ring)
 )
 
 // clang-format off

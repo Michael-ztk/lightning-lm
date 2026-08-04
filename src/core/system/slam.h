@@ -110,6 +110,7 @@ class SlamSystem {
     std::string livox_topic_;
     bool imu_in_g_ = false;
 
+    rclcpp::CallbackGroup::SharedPtr imu_cb_group_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_ = nullptr;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_ = nullptr;
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr livox_sub_ = nullptr;
