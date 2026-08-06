@@ -285,9 +285,9 @@ void G2P5::Convert3DTo2DScan(Keyframe::Ptr kf, G2P5MapPtr &map) {
             /// 如果动态检测失败，就用之前的参数
             floor_coeffs_ = Vec4d(0, 0, 1, -options_.default_floor_height_);
         } else {
-            if (options_.verbose_) {
-                LOG(INFO) << "floor coeffs: " << floor_coeffs_.transpose();
-            }
+            // if (options_.verbose_) {
+            //     LOG(INFO) << "floor coeffs: " << floor_coeffs_.transpose();
+            // }
         }
     } else {
         floor_coeffs_ = Vec4d(0, 0, 1, -options_.default_floor_height_);
