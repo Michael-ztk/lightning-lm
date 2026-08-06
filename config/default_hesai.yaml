@@ -77,6 +77,7 @@ loop_closing:
   source_submap_idx_range: 5
   source_submap_stride: 1
   with_height: false
+  save_loop_clouds: true  # 保存回环点云用于调试
 
 
 ### localization ================================================================================================

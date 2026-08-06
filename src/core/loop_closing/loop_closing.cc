@@ -54,6 +54,7 @@ void LoopClosing::Init(const std::string yaml_path) {
         options_.source_submap_idx_range_ = yaml.GetValue<int>("loop_closing", "source_submap_idx_range");
         options_.source_submap_stride_ = yaml.GetValue<int>("loop_closing", "source_submap_stride");
         options_.with_height_ = yaml.GetValue<bool>("loop_closing", "with_height");
+        options_.save_loop_clouds_ = yaml.GetValue<bool>("loop_closing", "save_loop_clouds");
     }
 
     if (options_.online_mode_) {
@@ -265,7 +266,7 @@ void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
     // LOG(INFO) << "lc result " << c.idx1_ << " -> " << c.idx2_ << ": score=" << c.ndt_score_ << ", Tw2_t="
     //           << t.transpose() << ", Tij_t=" << c.Tij_.translation().transpose() << ", saved=" << prefix;
 
-    if (c.ndt_score_ > options_.ndt_score_th_) {
+    if (c.ndt_score_ > options_.ndt_score_th_ && options_.save_loop_clouds_) {
         pcl::io::savePCDFileBinaryCompressed(
             "./data/lc_" + std::to_string(c.idx1_) + "_" + std::to_string(c.idx2_) + "_out.pcd", *output);
         pcl::io::savePCDFileBinaryCompressed(

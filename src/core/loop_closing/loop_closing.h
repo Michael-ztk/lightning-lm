@@ -44,6 +44,7 @@ class LoopClosing {
 
         bool with_height_ = true;
         double height_noise_ = 0.1;
+        bool save_loop_clouds_ = false;  // 保存回环点云用于调试
     };
 
     LoopClosing(Options options = Options()) { options_ = options; }
