@@ -28,6 +28,12 @@ class Keyframe {
     unsigned long GetID() const { return id_; }
     CloudPtr GetCloud() const { return cloud_; }
 
+    /// 替换关键帧点云（保存地图前的动态残影清洗会用）
+    void SetCloud(CloudPtr cloud) {
+        UL lock(data_mutex_);
+        cloud_ = cloud;
+    }
+
     SE3 GetLIOBodyPose() {
         UL lock(data_mutex_);
         return pose_lio_body_;

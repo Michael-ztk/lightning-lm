@@ -697,6 +697,10 @@ void LightningSystem::SaveMapInternal(const std::string& save_path) {
         std::filesystem::create_directories(save_path);
     }
 
+    // 射线free-space清洗：位姿已最终确定（回环优化后），在导出前用全部关键帧的视线证据
+    // 清除动态残影（行人等）与孤立噪点，直接改写关键帧点云，点云图与栅格图同时变干净
+    lio_->RemoveDynamicByKeyframeRays();
+
     auto global_map = lio_->GetGlobalMap(!with_loop_closing_);
 
     TiledMap::Options tm_options;
@@ -707,6 +711,9 @@ void LightningSystem::SaveMapInternal(const std::string& save_path) {
     tm.ConvertFromFullPCD(global_map, start_pose, save_path);
 
     pcl::io::savePCDFileBinaryCompressed(save_path + "/global.pcd", *global_map);
+
+    // 保存被射线清洗过滤的动态点，用于误删检查
+    lio_->SaveRayRemovedCloud(save_path);
 
     if (with_gridmap_ && g2p5_) {
         g2p5_->RedrawGlobalMap();

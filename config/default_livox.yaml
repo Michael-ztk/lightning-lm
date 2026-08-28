@@ -38,6 +38,17 @@ fasterlio:
   kf_dis_th: 1.0
   kf_angle_th: 10.0
 
+  # 射线free-space清洗：保存地图前用全部关键帧的视线证据清除动态残影（行人等）
+  rayclean_en: true               # 是否开启射线清洗
+  rayclean_voxel_size: 0.2        # 体素边长(m)，越小越精细但内存/计算翻倍
+  rayclean_pass_th: 2             # 体素被>=该数量的不同关键帧射线穿过（且表面观测少）判为动态残影
+  rayclean_end_th: 3              # 体素被<=该数量的不同关键帧观测为表面才允许判动态（静态表面会被反复观测，计数高，天然受保护）
+  rayclean_min_cluster_points: 20 # 射线判决候选的邻域(体素+26邻域)最少候选点数，低于此数的零星候选放回；调大可进一步防墙面/天花板零星误删
+  rayclean_max_range: 20.0        # 只统计该距离(m)内的点与射线
+  rayclean_ray_stride: 2          # 射线采样步长，每stride个点取一条射线，控制保存阶段耗时
+  rayclean_guard_dist: 0.3        # 距射线终点小于该距离(m)的体素不计穿越，保护表面贴邻体素（调大更保守）
+  rayclean_iso_remove: false      # 顺带删除孤立噪点（自身体素及26邻域内无其他点，主要清天花板噪点）
+  rayclean_debug_save: true       # 调试：将被清洗删除的点保存为 ray_removed_pts.pcd，用于误删检查
 
 g2p5:
   esti_floor: false   # 是否动态估计地面

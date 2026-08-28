@@ -228,6 +228,10 @@ void SlamSystem::SaveMap(const std::string& path) {
         std::filesystem::create_directories(save_path);
     }
 
+    // 射线free-space清洗：位姿已最终确定（回环优化后），在导出前用全部关键帧的视线证据
+    // 清除动态残影（行人等）与孤立噪点，直接改写关键帧点云，点云图与栅格图同时变干净
+    lio_->RemoveDynamicByKeyframeRays();
+
     // auto global_map_no_loop = lio_->GetGlobalMap(true);
     auto global_map = lio_->GetGlobalMap(!options_.with_loop_closing_);
     // auto global_map_raw = lio_->GetGlobalMap(!options_.with_loop_closing_, false, 0.1);
@@ -242,6 +246,9 @@ void SlamSystem::SaveMap(const std::string& path) {
     pcl::io::savePCDFileBinaryCompressed(save_path + "/global.pcd", *global_map);
     // pcl::io::savePCDFileBinaryCompressed(save_path + "/global_no_loop.pcd", *global_map_no_loop);
     // pcl::io::savePCDFileBinaryCompressed(save_path + "/global_raw.pcd", *global_map_raw);
+
+    // 保存被射线清洗过滤的动态点，用于误删检查
+    lio_->SaveRayRemovedCloud(save_path);
 
     if (options_.with_gridmap_) {
         /// 使用优化后的位姿重建栅格地图

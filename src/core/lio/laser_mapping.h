@@ -72,6 +72,19 @@ class LaserMapping {
     /// 保存前端的地图
     void SaveMap();
 
+    /**
+     * @brief 射线free-space清洗：建图结束、位姿最终确定后调用（保存地图前）
+     *
+     * 用所有关键帧的视线证据清除各关键帧点云中的动态残影（行人等动态物体走过留下的点）：
+     * 行人曾在的体素，其走开后会被后续关键帧的射线反复穿过（射线终点在其后的静态表面上），
+     * "被多个不同关键帧穿过 + 很少被作为表面观测"即判为动态体素，删除其中全部点。
+     * 直接改写关键帧点云，之后导出的点云图与栅格图同时变干净。离线一次执行，不占运行时CPU。
+     */
+    void RemoveDynamicByKeyframeRays();
+
+    /// 保存被射线清洗删除的点(世界系)到 dir/ray_removed_pts.pcd，用于误删检查
+    void SaveRayRemovedCloud(const std::string &dir);
+
     void SetUI(std::shared_ptr<ui::PangolinWindow> ui) { ui_ = ui; }
 
     void SetPose(const SE3& pose) { kf_.SetPose(pose); }
@@ -150,6 +163,19 @@ class LaserMapping {
     std::vector<double> extrinT_{3, 0.0};  // lidar-imu translation
     std::vector<double> extrinR_{9, 0.0};  // lidar-imu rotation
     std::string map_file_path_;
+
+    /// 射线free-space清洗参数（保存地图前离线执行）
+    bool rayclean_en_ = true;              // 是否开启射线清洗
+    double rayclean_voxel_size_ = 0.2;     // 体素边长(m)
+    int rayclean_pass_th_ = 2;             // 体素被>=该数量的不同关键帧射线穿过（且表面观测少）判为动态残影
+    int rayclean_end_th_ = 3;              // 体素内出现<=该数量的不同关键帧端点，配合穿越数判动态
+    int rayclean_min_cluster_points_ = 20; // 射线判决候选的邻域最少点数，低于此数的零星候选放回（防墙面/天花板零星误删）
+    double rayclean_max_range_ = 20.0;     // 只统计该距离(m)内的点与射线
+    int rayclean_ray_stride_ = 2;          // 射线采样步长，每stride个点取一条射线，控制计算量
+    double rayclean_guard_dist_ = 0.3;     // 距射线终点小于该距离(m)的体素不计穿越，保护表面贴邻体素
+    bool rayclean_iso_remove_ = false;     // 顺带删除孤立噪点（自身体素及26邻域内无其他点）
+    bool rayclean_debug_save_ = true;      // 调试：保存被射线清洗删除的点(世界系)到pcd
+    CloudPtr ray_removed_dbg_cloud_ = nullptr;  // 累积的被射线清洗删除的点(世界系)
 
     std::vector<Keyframe::Ptr> all_keyframes_;
     Keyframe::Ptr last_kf_ = nullptr;
