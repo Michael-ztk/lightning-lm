@@ -169,6 +169,17 @@ class LaserMapping {
     double rayclean_voxel_size_ = 0.2;     // 体素边长(m)
     int rayclean_pass_th_ = 2;             // 体素被>=该数量的不同关键帧射线穿过（且表面观测少）判为动态残影
     int rayclean_end_th_ = 3;              // 体素内出现<=该数量的不同关键帧端点，配合穿越数判动态
+    double rayclean_plane_protect_dist_ = 0.3;   // 平面保护：体素中心距检测平面小于该值(m)则不参与清洗
+    double rayclean_plane_tile_size_ = 10.0;     // 分块RANSAC的xy瓦片边长(m)
+    double rayclean_plane_ransac_dist_ = 0.15;   // RANSAC平面内点距离阈值(m)
+    double rayclean_plane_min_inlier_frac_ = 0.05;  // 平面最小内点比例(占瓦片点数)
+    bool rayclean_grow_en_ = true;         // 邻域生长：从已确认残影核心出发，吸收连通的动态边缘残余
+    int rayclean_grow_end_th_ = 12;        // 生长吸收判据：邻域体素端点观测次数<=该值（静态表面观测次数远高于此，生长自然止步）
+    int rayclean_grow_steps_ = 12;         // 生长最大步数（体素）
+    int rayclean_late_pass_th_ = 2;        // 迟到穿越判据：体素在最后一次被观测为表面之后仍被>=该数量的不同关键帧
+                                           // 穿越，且邻域无保护体素（远离地面/墙面的悬空位置），判为动态残影。
+                                           // 用于找回"多拨行人反复经过同一区域"导致的观测次数累计超标的残影；
+                                           // 漂移窗格紧贴保护平面带，被 near_protected 门控排除，不会误伤结构
     int rayclean_min_cluster_points_ = 20; // 射线判决候选的邻域最少点数，低于此数的零星候选放回（防墙面/天花板零星误删）
     double rayclean_max_range_ = 20.0;     // 只统计该距离(m)内的点与射线
     int rayclean_ray_stride_ = 2;          // 射线采样步长，每stride个点取一条射线，控制计算量

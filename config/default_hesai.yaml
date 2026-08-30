@@ -44,6 +44,16 @@ fasterlio:
   rayclean_voxel_size: 0.2        # 体素边长(m)，越小越精细但内存/计算翻倍
   rayclean_pass_th: 2             # 体素被>=该数量的不同关键帧射线穿过（且表面观测少）判为动态残影
   rayclean_end_th: 3              # 体素被<=该数量的不同关键帧观测为表面才允许判动态（静态表面会被反复观测，计数高，天然受保护）
+  rayclean_plane_protect_dist: 0.3  # 平面保护：距检测平面小于该值(m)的体素不参与清洗（地面/墙面点一律保留）
+  rayclean_plane_tile_size: 10.0    # 分块RANSAC的xy瓦片边长(m)
+  rayclean_plane_ransac_dist: 0.15  # RANSAC平面内点距离阈值(m)
+  rayclean_plane_min_inlier_frac: 0.05  # 平面最小内点比例(占瓦片点数)
+  rayclean_grow_en: true              # 邻域生长：从已确认残影核心出发，吸收连通的动态边缘残余
+  rayclean_grow_end_th: 12            # 生长吸收判据：邻域体素端点观测次数<=该值（静态表面观测次数远高于此，生长自然止步）
+  rayclean_grow_steps: 12             # 生长最大步数(体素)
+  rayclean_late_pass_th: 999          # 迟到穿越判据（实验性）：999=禁用。设为2时，"最后一次被观测为表面之后仍被>=2个
+                                      # 关键帧穿越且远离平面带"的体素也会被删——可找回多拨行人反复经过同一区域
+                                      # 的残留，但会对漂移弯曲的墙面/绿篱引入额外误删（0730实测 2.2k→8.7k）
   rayclean_min_cluster_points: 20 # 射线判决候选的邻域(体素+26邻域)最少候选点数，低于此数的零星候选放回；调大可进一步防墙面/天花板零星误删
   rayclean_max_range: 20.0        # 只统计该距离(m)内的点与射线
   rayclean_ray_stride: 2          # 射线采样步长，每stride个点取一条射线，控制保存阶段耗时

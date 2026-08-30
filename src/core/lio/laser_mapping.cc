@@ -3,6 +3,8 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <random>
+#include <unordered_map>
 #include <fstream>
 
 #include "common/options.h"
@@ -83,6 +85,19 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         rayclean_voxel_size_ = flio["rayclean_voxel_size"] ? flio["rayclean_voxel_size"].as<double>() : rayclean_voxel_size_;
         rayclean_pass_th_ = flio["rayclean_pass_th"] ? flio["rayclean_pass_th"].as<int>() : rayclean_pass_th_;
         rayclean_end_th_ = flio["rayclean_end_th"] ? flio["rayclean_end_th"].as<int>() : rayclean_end_th_;
+        rayclean_plane_protect_dist_ =
+            flio["rayclean_plane_protect_dist"] ? flio["rayclean_plane_protect_dist"].as<double>() : rayclean_plane_protect_dist_;
+        rayclean_plane_tile_size_ =
+            flio["rayclean_plane_tile_size"] ? flio["rayclean_plane_tile_size"].as<double>() : rayclean_plane_tile_size_;
+        rayclean_plane_ransac_dist_ =
+            flio["rayclean_plane_ransac_dist"] ? flio["rayclean_plane_ransac_dist"].as<double>() : rayclean_plane_ransac_dist_;
+        rayclean_plane_min_inlier_frac_ = flio["rayclean_plane_min_inlier_frac"]
+                                              ? flio["rayclean_plane_min_inlier_frac"].as<double>()
+                                              : rayclean_plane_min_inlier_frac_;
+        rayclean_grow_en_ = flio["rayclean_grow_en"] ? flio["rayclean_grow_en"].as<bool>() : rayclean_grow_en_;
+        rayclean_grow_end_th_ = flio["rayclean_grow_end_th"] ? flio["rayclean_grow_end_th"].as<int>() : rayclean_grow_end_th_;
+        rayclean_grow_steps_ = flio["rayclean_grow_steps"] ? flio["rayclean_grow_steps"].as<int>() : rayclean_grow_steps_;
+        rayclean_late_pass_th_ = flio["rayclean_late_pass_th"] ? flio["rayclean_late_pass_th"].as<int>() : rayclean_late_pass_th_;
         rayclean_min_cluster_points_ =
             flio["rayclean_min_cluster_points"] ? flio["rayclean_min_cluster_points"].as<int>() : rayclean_min_cluster_points_;
         rayclean_max_range_ = flio["rayclean_max_range"] ? flio["rayclean_max_range"].as<double>() : rayclean_max_range_;
@@ -919,6 +934,158 @@ void LaserMapping::RemoveDynamicByKeyframeRays() {
         return ix >= 0 && ix < nx && iy >= 0 && iy < ny && iz >= 0 && iz < nz;
     };
 
+    /// ---- 平面保护：分块RANSAC检测地面/墙面等结构性平面，邻近体素不参与清洗 ----
+    // 地面/墙面的体素会因掠射穿越+位姿漂移呈现"被穿越且鲜被观测"的动态特征，是误删的主要来源。
+    // 按瓦片分块拟合局部平面（瓦片内局部刚性，漂移弯曲的结构面也能覆盖），保护后不再误删
+    std::vector<Eigen::Vector4d> protect_planes;  // (nx,ny,nz,d): n*x+d=0
+    {
+        std::vector<Eigen::Vector3d> pts;
+        pts.reserve(total_pts / 8 + 16);
+        for (int i = 0; i < n_kf; ++i) {
+            const auto &cloud = kfs[i]->GetCloud();
+            if (!cloud) {
+                continue;
+            }
+            for (size_t pi = 0; pi < cloud->points.size(); pi += 8) {
+                Vec3d pw = kf_rot[i] * cloud->points[pi].getVector3fMap().cast<double>() + kf_pos[i];
+                if ((pw - kf_pos[i]).squaredNorm() > max_range_sq) {
+                    continue;
+                }
+                pts.emplace_back(pw);
+            }
+        }
+        const double tile = rayclean_plane_tile_size_;
+        std::unordered_map<uint64_t, std::vector<int>> tiles;
+        for (int i = 0; i < static_cast<int>(pts.size()); ++i) {
+            const int64_t tx = static_cast<int64_t>(std::floor(pts[i].x() / tile));
+            const int64_t ty = static_cast<int64_t>(std::floor(pts[i].y() / tile));
+            tiles[(static_cast<uint64_t>(tx) << 32) ^ static_cast<uint64_t>(ty & 0xFFFFFFFFll)].push_back(i);
+        }
+        const int kIters = 150;
+        for (const auto &kv : tiles) {
+            const std::vector<int> &idxs = kv.second;
+            if (idxs.size() < 500) {
+                continue;
+            }
+            for (int round = 0; round < 2; ++round) {  // 每瓦片最多2个平面（如地面+墙裙）
+                std::vector<int> avail;
+                avail.reserve(idxs.size());
+                for (int i : idxs) {
+                    bool used_flag = false;
+                    for (const auto &pl : protect_planes) {
+                        if (std::fabs(pl.head<3>().dot(pts[i]) + pl.w()) < rayclean_plane_ransac_dist_ * 1.5) {
+                            used_flag = true;
+                            break;
+                        }
+                    }
+                    if (!used_flag) {
+                        avail.push_back(i);
+                    }
+                }
+                if (avail.size() < std::max<size_t>(300, idxs.size() * rayclean_plane_min_inlier_frac_)) {
+                    break;
+                }
+                int best_inliers = 0;
+                Eigen::Vector4d best_plane(0, 0, 1, 0);
+                std::mt19937 rng(static_cast<unsigned>(kv.first) + 20260830u + round * 7919u);
+                std::uniform_int_distribution<int> uni(0, static_cast<int>(avail.size()) - 1);
+                for (int it = 0; it < kIters; ++it) {
+                    const Eigen::Vector3d &pa = pts[avail[uni(rng)]], &pb = pts[avail[uni(rng)]],
+                                          &pc = pts[avail[uni(rng)]];
+                    if ((pa - pb).norm() < 1.0 || (pa - pc).norm() < 1.0 || (pb - pc).norm() < 1.0) {
+                        continue;
+                    }
+                    Eigen::Vector4d pl;
+                    pl.head<3>() = (pb - pa).cross(pc - pa);
+                    const double nrm = pl.head<3>().norm();
+                    if (nrm < 1e-6) {
+                        continue;
+                    }
+                    pl.head<3>() /= nrm;
+                    pl.w() = -pl.head<3>().dot(pa);
+                    int cnt = 0;
+                    for (int i : avail) {
+                        if (std::fabs(pl.head<3>().dot(pts[i]) + pl.w()) < rayclean_plane_ransac_dist_) {
+                            cnt++;
+                        }
+                    }
+                    if (cnt > best_inliers) {
+                        best_inliers = cnt;
+                        best_plane = pl;
+                    }
+                }
+                if (best_inliers < static_cast<int>(std::max<size_t>(300, avail.size() * rayclean_plane_min_inlier_frac_))) {
+                    break;
+                }
+                // 内点PCA精修
+                Eigen::Vector3d mean = Eigen::Vector3d::Zero();
+                int m = 0;
+                for (int i : avail) {
+                    if (std::fabs(best_plane.head<3>().dot(pts[i]) + best_plane.w()) < rayclean_plane_ransac_dist_) {
+                        mean += pts[i];
+                        m++;
+                    }
+                }
+                if (m > 3) {
+                    mean /= m;
+                    Eigen::Matrix3d cov = Eigen::Matrix3d::Zero();
+                    for (int i : avail) {
+                        if (std::fabs(best_plane.head<3>().dot(pts[i]) + best_plane.w()) < rayclean_plane_ransac_dist_) {
+                            const Eigen::Vector3d ev = pts[i] - mean;
+                            cov += ev * ev.transpose();
+                        }
+                    }
+                    cov /= m;
+                    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(cov);
+                    best_plane.head<3>() = es.eigenvectors().col(0);
+                    best_plane.w() = -best_plane.head<3>().dot(mean);
+                }
+                protect_planes.push_back(best_plane);
+                LOG(INFO) << "ray clean plane[" << protect_planes.size() - 1 << "]: inliers=" << best_inliers << "/"
+                          << avail.size() << " n=[" << best_plane[0] << ", " << best_plane[1] << ", "
+                          << best_plane[2] << "] d=" << best_plane[3];
+            }
+        }
+        LOG(INFO) << "ray clean protect planes total: " << protect_planes.size();
+    }
+    // 体素保护掩码：距任一检测平面小于 protect_dist 的体素不参与清洗
+    std::vector<uint8_t> protected_mask(n_cells, 0);
+    for (int64_t i = 0; i < n_cells; ++i) {
+        const int64_t ix = i / (ny * nz), iy = (i / nz) % ny, iz = i % nz;
+        const Vec3d ctr(grid_min.x() + (ix + 0.5) * voxel_used, grid_min.y() + (iy + 0.5) * voxel_used,
+                        grid_min.z() + (iz + 0.5) * voxel_used);
+        for (const auto &pl : protect_planes) {
+            if (std::fabs(pl.head<3>().dot(ctr) + pl.w()) < rayclean_plane_protect_dist_) {
+                protected_mask[i] = 1;
+                break;
+            }
+        }
+    }
+    // near_protected: 自身或26邻域存在保护体素（贴近平面带）。迟到穿越判据只在远离
+    // 平面带的位置生效——漂移窗格（表面观测提前终止的静态体素）必然贴着平面带，
+    // 而多拨行人反复经过的悬空残影远离平面带，以此门控区分二者
+    std::vector<uint8_t> near_protected(n_cells, 0);
+    for (int64_t i = 0; i < n_cells; ++i) {
+        if (!protected_mask[i]) {
+            continue;
+        }
+        const int64_t ix = i / (ny * nz), iy = (i / nz) % ny, iz = i % nz;
+        for (int dx = -1; dx <= 1; ++dx)
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dz = -1; dz <= 1; ++dz) {
+                    const int64_t jx = ix + dx, jy = iy + dy, jz = iz + dz;
+                    if (jx < 0 || jx >= nx || jy < 0 || jy >= ny || jz < 0 || jz >= nz) {
+                        continue;
+                    }
+                    near_protected[(jx * ny + jy) * nz + jz] = 1;
+                }
+    }
+    // 迟到穿越计数：最后一次被观测为表面之后，仍有多少个不同关键帧的射线穿过该体素
+    std::vector<std::atomic<uint16_t>> late_cnt(n_cells);
+    for (int64_t i = 0; i < n_cells; ++i) {
+        late_cnt[i].store(0);
+    }
+
     // 无锁更新体素端点计数（同一关键帧只记一次；不同线程处理不同关键帧，CAS安全）
     auto add_end = [&](int64_t cell_idx, int kf_idx) {
         uint64_t cur = cells[cell_idx].load(std::memory_order_relaxed);
@@ -995,6 +1162,7 @@ void LaserMapping::RemoveDynamicByKeyframeRays() {
         std::atomic<int> next_kf(0);
         for (unsigned t = 0; t < n_thread; ++t) {
             workers.emplace_back([&]() {
+                std::vector<int32_t> last_seen_late(n_cells, -1);
                 int i;
                 while ((i = next_kf.fetch_add(1)) < n_kf) {
                     const auto &cloud = kfs[i]->GetCloud();
@@ -1059,7 +1227,21 @@ void LaserMapping::RemoveDynamicByKeyframeRays() {
                             if ((center - e).squaredNorm() < guard_dist_sq) {
                                 continue;
                             }
-                            add_pass((ix * ny + iy) * nz + iz, i);
+                            const int64_t pidx = (ix * ny + iy) * nz + iz;
+                            add_pass(pidx, i);
+                            // 迟到穿越：本次穿越发生在该体素最后一次被观测为表面之后
+                            // （last_end 从 pass-1 写入的 cell 字低位段读取）
+                            if (last_seen_late[pidx] != i) {
+                                const uint64_t cur = cells[pidx].load(std::memory_order_relaxed);
+                                const uint32_t last_end = static_cast<uint32_t>(cur & 0xFFFF);
+                                if (last_end != 0 && i > static_cast<int>(last_end)) {
+                                    last_seen_late[pidx] = i;
+                                    uint16_t lc = late_cnt[pidx].load(std::memory_order_relaxed);
+                                    while (lc < 0xFFFF && !late_cnt[pidx].compare_exchange_weak(
+                                                             lc, lc + 1, std::memory_order_relaxed)) {
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1082,10 +1264,20 @@ void LaserMapping::RemoveDynamicByKeyframeRays() {
     /// ---- 第3.5遍：射线判决候选的空间密度统计 ----
     // 只计数满足动态残影判据的"候选点"；真正删除前要求其体素+26邻域内候选总数达标。
     // 行人残影点集稠密、轻易达到阈值；墙面/天花板被掠射零星误判的孤立候选四周无同伙，放回
-    auto ray_condemn_check = [&](uint64_t c) -> bool {
-        uint64_t pass_cnt = (c >> 48) & 0xFFFF;
-        uint64_t end_cnt = (c >> 32) & 0xFFFF;
-        return pass_cnt >= (uint64_t)rayclean_pass_th_ && end_cnt >= 1 && end_cnt <= (uint64_t)rayclean_end_th_;
+    auto ray_condemn_check = [&](int64_t idx) -> bool {
+        const uint64_t c = cells[idx].load(std::memory_order_relaxed);
+        const uint64_t pass_cnt = (c >> 48) & 0xFFFF;
+        const uint64_t end_cnt = (c >> 32) & 0xFFFF;
+        // 原判据：被穿越 且 观测次数少（快速通过的行人）
+        if (pass_cnt >= (uint64_t)rayclean_pass_th_ && end_cnt >= 1 && end_cnt <= (uint64_t)rayclean_end_th_) {
+            return true;
+        }
+        // 迟到穿越判据：最后一次被观测为表面之后仍被>=late_pass_th个不同关键帧穿越，
+        // 且远离平面保护带（多拨行人反复经过/久站后离开的悬空残影；贴平面带的漂移窗格被门控排除）
+        if (!near_protected[idx] && late_cnt[idx].load(std::memory_order_relaxed) >= (uint16_t)rayclean_late_pass_th_) {
+            return true;
+        }
+        return false;
     };
     std::vector<std::atomic<uint16_t>> cand_cnt(n_cells);
     for (int64_t i = 0; i < n_cells; ++i) {
@@ -1106,12 +1298,85 @@ void LaserMapping::RemoveDynamicByKeyframeRays() {
                 continue;
             }
             int64_t idx = (ix * ny + iy) * nz + iz;
-            if (ray_condemn_check(cells[idx].load(std::memory_order_relaxed))) {
+            if (protected_mask[idx]) {
+                continue;  // 平面保护：地面/墙面等结构性平面不参与清洗
+            }
+            if (ray_condemn_check(idx)) {
                 uint16_t c = cand_cnt[idx].load(std::memory_order_relaxed);
                 while (c < 0xFFFF && !cand_cnt[idx].compare_exchange_weak(c, c + 1, std::memory_order_relaxed)) {
                 }
             }
         }
+    }
+
+    /// ---- 第3.6遍：邻域生长吸收残影边缘 ----
+    // 已确认删除的残影核心周围，常残留同一动态物体的边缘点（观测次数略高或聚类支持不足）。
+    // 从确认体素出发BFS生长，吸收连通的、有动态证据（被穿越 且 观测次数<=grow_end_th）且非
+    // 保护区、含点的邻域体素；地面/墙面等静态表面被平面保护且观测次数远超阈值，生长自然
+    // 止步于残影边界
+    std::vector<uint8_t> remove_mask(n_cells, 0);
+    size_t grown_cells = 0;
+    if (rayclean_grow_en_) {
+        // 种子：判据通过 且 聚类支持达标（与第3遍逐点判定一致，按体素预计算）
+        std::vector<int64_t> frontier;
+        for (int64_t i = 0; i < n_cells; ++i) {
+            if (protected_mask[i]) {
+                continue;
+            }
+            if (!ray_condemn_check(i)) {
+                continue;
+            }
+            const int64_t ix = i / (ny * nz), iy = (i / nz) % ny, iz = i % nz;
+            int support = 0;
+            for (int64_t dx = -1; dx <= 1 && support < rayclean_min_cluster_points_; ++dx)
+                for (int64_t dy = -1; dy <= 1 && support < rayclean_min_cluster_points_; ++dy)
+                    for (int64_t dz = -1; dz <= 1 && support < rayclean_min_cluster_points_; ++dz) {
+                        const int64_t jx = ix + dx, jy = iy + dy, jz = iz + dz;
+                        if (jx < 0 || jx >= nx || jy < 0 || jy >= ny || jz < 0 || jz >= nz) {
+                            continue;
+                        }
+                        support += cand_cnt[(jx * ny + jy) * nz + jz].load(std::memory_order_relaxed);
+                    }
+            if (support >= rayclean_min_cluster_points_) {
+                remove_mask[i] = 1;  // 1=确认种子
+                frontier.push_back(i);
+            }
+        }
+        // BFS 生长
+        for (int step = 0; step < rayclean_grow_steps_ && !frontier.empty(); ++step) {
+            std::vector<int64_t> next;
+            for (const int64_t i : frontier) {
+                const int64_t ix = i / (ny * nz), iy = (i / nz) % ny, iz = i % nz;
+                for (int d = 0; d < 27; ++d) {
+                    const int64_t jx = ix + d / 9 - 1, jy = iy + (d / 3) % 3 - 1, jz = iz + d % 3 - 1;
+                    if (jx < 0 || jx >= nx || jy < 0 || jy >= ny || jz < 0 || jz >= nz) {
+                        continue;
+                    }
+                    const int64_t j = (jx * ny + jy) * nz + jz;
+                    if (remove_mask[j] || protected_mask[j]) {
+                        continue;
+                    }
+                    if (pt_cnt[j].load(std::memory_order_relaxed) == 0) {
+                        continue;  // 只吸收含点的体素
+                    }
+                    const uint64_t c = cells[j].load(std::memory_order_relaxed);
+                    const uint64_t pass_cnt = (c >> 48) & 0xFFFF;
+                    const uint64_t end_cnt = (c >> 32) & 0xFFFF;
+                    const bool late_ok = !near_protected[j] &&
+                                         late_cnt[j].load(std::memory_order_relaxed) >=
+                                             (uint16_t)rayclean_late_pass_th_;
+                    if (pass_cnt < (uint64_t)rayclean_pass_th_ || end_cnt < 1 ||
+                        (!(late_ok || end_cnt <= (uint64_t)rayclean_grow_end_th_))) {
+                        continue;  // 无穿越证据，或观测次数过高且无迟到穿越（静态表面），不吸收
+                    }
+                    remove_mask[j] = 2;  // 2=邻域生长吸收
+                    grown_cells++;
+                    next.push_back(j);
+                }
+            }
+            frontier = std::move(next);
+        }
+        LOG(INFO) << "ray clean grow: absorbed_cells=" << grown_cells << " steps=" << rayclean_grow_steps_;
     }
 
     for (int i = 0; i < n_kf; ++i) {
@@ -1134,25 +1399,18 @@ void LaserMapping::RemoveDynamicByKeyframeRays() {
             bool by_ray = false;
             if (in_grid) {
                 int64_t idx = (ix * ny + iy) * nz + iz;
-                uint64_t c = cells[idx].load(std::memory_order_relaxed);
-                if (ray_condemn_check(c)) {
-                    // 最小聚类确认：邻域内候选点过少的零星候选放回，防墙面/天花板零星误删
-                    int support = 0;
-                    for (int64_t dx = -1; dx <= 1 && support < rayclean_min_cluster_points_; ++dx)
-                        for (int64_t dy = -1; dy <= 1 && support < rayclean_min_cluster_points_; ++dy)
-                            for (int64_t dz = -1; dz <= 1 && support < rayclean_min_cluster_points_; ++dz) {
-                                int64_t jx = ix + dx, jy = iy + dy, jz = iz + dz;
-                                if (jx < 0 || jx >= nx || jy < 0 || jy >= ny || jz < 0 || jz >= nz) {
-                                    continue;
-                                }
-                                support += cand_cnt[(jx * ny + jy) * nz + jz].load(std::memory_order_relaxed);
-                            }
-                    if (support >= rayclean_min_cluster_points_) {
-                        remove = true;  // 动态残影：被多个关键帧视线穿过且鲜被观测为表面
-                        by_ray = true;
-                    } else {
-                        restored_sparse++;  // 零星候选放回
-                    }
+                if (protected_mask[idx]) {
+                    in_grid = false;  // 平面保护：地面/墙面点一律保留
+                }
+            }
+            if (in_grid) {
+                int64_t idx = (ix * ny + iy) * nz + iz;
+                const uint8_t mk = remove_mask[idx];
+                if (mk != 0) {
+                    remove = true;  // 动态残影（种子确认或邻域生长吸收）
+                    by_ray = true;
+                } else if (ray_condemn_check(idx)) {
+                    restored_sparse++;  // 候选但未达聚类支持，零星放回
                 } else if (rayclean_iso_remove_ && pt_cnt[idx].load(std::memory_order_relaxed) == 1) {
                     // 孤立噪点：自身体素只有1个点且26邻域也全空（天花板噪点等）
                     bool has_nb = false;
