@@ -853,19 +853,23 @@ void LaserMapping::ObsModel(NavState &s, ESKF::CustomObservationModel &obs) {
  * 行0（位移增量，约束位置块 idx 0）：
  *   观测 z0 = v_body·dt（轮速推算位移），h0 = e_forwardᵀ·(p_cur - p_prev)（状态实际前向位移）
  *   r0 = v_body·dt - e_forwardᵀ·Δp
- *   ∂h0/∂δp = e_forwardᵀ；∂h0/∂δθ = -Δpᵀ·R·hat(fwd_body)
+ *   ∂h0/∂δp = e_forwardᵀ
  *   作用：雷达在退化方向钉死绝对位置时直接推动位置，打破冻结
  *
  * 行1（前向速度，约束速度块 idx 12）：
  *   观测 z1 = v_body（轮速），h1 = e_forwardᵀ·v_world（状态速度的前向分量）
  *   残差按 ×dt 换算到米，与行0同量纲共用标量噪声 R
  *   r1 = dt·(v_body - e_forwardᵀ·v_world)
- *   ∂h1/∂δv = dt·e_forwardᵀ；∂h1/∂δθ = dt·(fwd_body × v_body)
+ *   ∂h1/∂δv = dt·e_forwardᵀ
  *   作用：走廊退化方向雷达看不到前进速度时直接顶住速度，防止速度状态塌陷
  *
  * 关键：e_forward = R·fwd_body，fwd_body 由 odom_yaw_offset 派生（安装朝向 y后x左 时
- *   为 -π/2，即前进 = body -y）；行1 的旋转雅可比在纯直行时恒为 0，不会把侧向/垂向
- *   速度压成 0 而耦合 yaw（旧 3D 速度模型的 49°突跳根源）。
+ *   为 -π/2，即前进 = body -y）。
+ *
+ * 姿态雅可比（∂/∂δθ）刻意置零：轮速存在轮径标度误差时（实测本底盘约-2%），
+ *   平地上残差被强观测的位置吸收，但坡道段 ∂h0/∂δθ=-(RᵀΔp)_z≠0 会把里程差
+ *   泄入pitch（正反馈→z漂移），转弯段航向项同理泄入yaw。姿态完全交给IMU/雷达，
+ *   轮速仍顶住退化方向的位置/速度，长走廊xy收益不受影响。
  *
  * 首帧无上一帧位姿时 valid_=false，跳过本次观测更新，下一帧起才有位移增量基准。
  */
@@ -881,7 +885,6 @@ void LaserMapping::WheelSpeedModel(NavState &s, ESKF::CustomObservationModel &ob
     const Mat3d R = s.rot_.matrix();
     const Vec3d e_forward = R * fwd_body_;            // 车头方向（body 前进轴在世界系）
     const Vec3d v_w = s.vel_;                         // 世界系速度
-    const Vec3d v_body = R.transpose() * v_w;         // body 系速度
     const Vec3d delta_state = s.pos_ - last_wheel_pos_;
     const double vx = cur_wheel_vel_.dot(fwd_body_);  // 轮速前向分量（标量）
     const double dt = wheel_obs_dt_;
@@ -897,14 +900,13 @@ void LaserMapping::WheelSpeedModel(NavState &s, ESKF::CustomObservationModel &ob
     obs.residual_(0) = expect_disp - measured_disp;
     obs.residual_(1) = expect_disp - measured_v_disp;
 
-    // 行0 雅可比
-    obs.h_x_.block<1, 3>(0, 0) = e_forward.transpose();                             // ∂h0/∂δp
-    obs.h_x_.block<1, 3>(0, 3) = -delta_state.transpose() * R * SO3::hat(fwd_body_);  // ∂h0/∂δθ
-
-    // 行1 雅可比
+    // 位移/速度观测只约束位置与速度块，不约束姿态块：
+    // 轮速存在轮径标度误差时（实测本底盘约-2%），平地上残差被强观测的位置吸收，
+    // 但坡道段 ∂h0/∂δθ=-(RᵀΔp)_z≠0 会把里程差泄入pitch（正反馈→z漂移），
+    // 转弯段航向项同理泄入yaw。清零姿态雅可比后姿态完全由IMU/雷达约束，
+    // 轮速仍顶住退化方向的位置/速度，长走廊xy收益不受影响。
+    obs.h_x_.block<1, 3>(0, 0) = e_forward.transpose();  // ∂h0/∂δp
     obs.h_x_.block<1, 3>(1, 12) = (dt * e_forward).transpose();  // ∂h1/∂δv
-    Vec3d dv_dtheta = fwd_body_.cross(v_body);                   // ∂h1/∂δθ
-    obs.h_x_.block<1, 3>(1, 3) = (dt * dv_dtheta).transpose();   // ∂h1/∂δθ
 
     // 供日志/统计用
     obs.lidar_residual_mean_ = std::fabs(obs.residual_(0)) + std::fabs(obs.residual_(1));
