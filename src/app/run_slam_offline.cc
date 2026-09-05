@@ -51,6 +51,13 @@ int main(int argc, char** argv) {
     std::string imu_topic = yaml.GetValue<std::string>("common", "imu_topic");
     rosbag.SetImuInG(yaml.GetValue<bool>("common", "imu_in_g"));
 
+    /// 轮速里程计话题（可选，配置了才订阅）
+    std::string odom_topic;
+    try {
+        odom_topic = yaml.GetValue<std::string>("common", "odom_topic");
+    } catch (const std::exception &) {
+    }
+
     rosbag
         /// IMU 的处理
         .AddImuHandle(imu_topic,
@@ -70,8 +77,19 @@ int main(int argc, char** argv) {
                              [&slam](livox_ros_driver2::msg::CustomMsg::SharedPtr cloud) {
                                  slam.ProcessLidar(cloud);
                                  return true;
-                             })
-        .Go();
+                             });
+
+    /// odom 的处理
+    if (!odom_topic.empty()) {
+        rosbag.AddOdomHandle(odom_topic,
+                             [&slam](OdomPtr odom) {
+                                 slam.ProcessOdom(odom);
+                                 return true;
+                             });
+        LOG(INFO) << "odom topic: " << odom_topic;
+    }
+
+    rosbag.Go();
 
     slam.SaveMap("");
     Timer::PrintAll();
