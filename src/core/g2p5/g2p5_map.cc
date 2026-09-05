@@ -275,12 +275,15 @@ nav_msgs::msg::OccupancyGrid G2P5Map::ToROS() {
                         unsigned int hit_cnt = 0, visit_cnt = 0;
                         grids_[bxi][byi].GetHitAndVisit(sxi, syi, hit_cnt, visit_cnt);
 
-                        float occ = (visit_cnt > 3) ? (float)hit_cnt / (float)visit_cnt : -1;
+                        // 避免少量观测误判为障碍物：占比达标且观测次数足够多才判占据
+                        if (visit_cnt == 0) {
+                            continue;
+                        }
+
+                        float occ = (float)hit_cnt / (float)visit_cnt;
 
                         /// 注意这里有转置符号
-                        if (occ < 0) {
-                            continue;
-                        } else if (occ > options_.occupancy_ratio_) {
+                        if (occ > options_.occupancy_ratio_ && visit_cnt > 3) {
                             tmp_area++;
                             occu_map.data[MapIdx(image_width, x, y)] = 100;
                         } else {
