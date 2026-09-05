@@ -5,6 +5,7 @@ common:
   livox_lidar_topic: "/livox/lidar_raw"
   imu_topic: "/livox/imu"
   imu_in_g: true
+  odom_topic: "/diff_chassis_driver/odom"  # 轮速里程计话题（留空则不订阅）
 
 # fasterlio 参数
 fasterlio:
@@ -60,6 +61,14 @@ fasterlio:
   rayclean_guard_dist: 0.3        # 距射线终点小于该距离(m)的体素不计穿越，保护表面贴邻体素（调大更保守）
   rayclean_iso_remove: false      # 顺带删除孤立噪点（自身体素及26邻域内无其他点，主要清天花板噪点）
   rayclean_debug_save: true       # 调试：将被清洗删除的点保存为 ray_removed_pts.pcd，用于误删检查
+
+  # 轮速里程计融合（序贯紧耦合：雷达观测更新后单独做一次轮速位移增量观测更新）
+  odom_en: true
+  odom_vel_noise: 0.01        # 轮速线速度观测噪声 (m/s)^2，σ=0.1m/s
+  odom_pos_noise_floor: 0.002 # 位移观测噪声下限(m)，仅数值兜底，应远小于基础噪声σ_vel·dt
+  odom_pos_noise_ratio: 0.05  # 位移观测的比例噪声(无量纲)，模型化轮径标度误差/打滑
+  odom_max_time_diff: 0.2     # 轮速与帧尾时间最大允许偏差(s)，超过弃用该帧轮速
+  odom_yaw_offset: -1.5708    # 底盘前进方向在body系的yaw角(rad)；安装朝向 y后x左 => 前进=body -y => -π/2
 
 g2p5:
   esti_floor: true   # 是否动态估计地面

@@ -69,6 +69,9 @@ class LaserMapping {
 
     void ProcessIMU(const lightning::IMUPtr &msg_in);
 
+    /// 轮速里程计数据入口（body系线速度），用于退化场景的速度观测约束
+    void ProcessOdom(const OdomPtr &odomData);
+
     /// 保存前端的地图
     void SaveMap();
 
@@ -128,6 +131,9 @@ class LaserMapping {
     bool SyncPackages();
 
     void ObsModel(NavState &s, ESKF::CustomObservationModel &obs);
+
+    /// 轮速速度观测模型（序贯紧耦合，退化方向由轮速约束）
+    void WheelSpeedModel(NavState &s, ESKF::CustomObservationModel &obs);
 
     inline void PointBodyToWorld(const PointType &pi, PointType &po) {
         Vec3d p_global(state_point_.rot_ * (state_point_.offset_R_lidar_ * pi.getVector3fMap().cast<double>() +
@@ -211,6 +217,7 @@ class LaserMapping {
 
     std::deque<PointCloudType::Ptr> lidar_buffer_;
     std::deque<lightning::IMUPtr> imu_buffer_;
+    std::deque<OdomPtr> odom_buffer_;  // 轮速里程计缓冲（与雷达/IMU共用mtx_buffer_）
 
     /// options
     bool keep_first_imu_estimation_ = false;    // 在没有建立地图前，是否要使用前几帧的IMU状态
@@ -218,8 +225,29 @@ class LaserMapping {
     double last_timestamp_lidar_ = 0;
     double lidar_end_time_ = 0;
     double last_timestamp_imu_ = -1.0;
+    double last_timestamp_odom_ = -1.0;
     double first_lidar_time_ = 0.0;
     bool lidar_pushed_ = false;
+
+    /// 轮速融合参数与当帧观测
+    bool odom_en_ = false;                 // 是否启用轮速融合
+    double odom_vel_noise_ = 0.01;         // 轮速线速度观测噪声 (m/s)^2，σ=0.1m/s
+    double odom_pos_noise_floor_ = 0.002;  // 位移观测噪声下限(m)，仅数值兜底，应远小于基础噪声σ_vel·dt
+    double odom_pos_noise_ratio_ = 0.05;   // 位移观测的比例噪声(无量纲)，模型化轮径误差/打滑
+    double odom_max_time_diff_ = 0.2;      // 轮速与帧尾时间最大允许偏差(s)
+    double odom_yaw_offset_ = 0.0;         // 底盘系相对IMU系的yaw偏移(rad)
+    Vec3d cur_wheel_vel_ = Vec3d::Zero();               // 当帧轮速观测（body系）
+    Vec3d fwd_body_ = Vec3d(1.0, 0.0, 0.0);             // body系车头方向单位向量，由 odom_yaw_offset 派生
+    bool has_wheel_obs_ = false;                        // 当帧是否有可用轮速观测
+
+    // 位移增量观测：记录上一帧融合后位姿，用 (p_cur-p_prev) 与 R·v_body·dt 的残差约束位置，
+    // 避免雷达在退化方向钉死绝对位置时轮速因只观测速度而推不动位姿。
+    // 注意：p_prev 记录的是上一帧做完 LIDAR+WHEEL 更新后的位置，其时间基准是上一帧的
+    // lidar_end_time_，因此 wheel_obs_dt_ 也必须用帧尾时间差，不能再用 odom 时间戳差。
+    Vec3d last_wheel_pos_ = Vec3d::Zero();  // 上一帧融合后的世界系位置
+    double last_wheel_time_ = -1.0;         // 上一帧帧尾时间(s)，与 last_wheel_pos_ 同基准
+    double wheel_obs_dt_ = 0.0;             // 当帧与上帧的帧尾时间差(s)
+    bool has_last_wheel_ = false;           // 是否已有上一帧轮速位姿（首帧无增量）
 
     bool enable_skip_lidar_ = true;  // 雷达是否需要跳帧
     int skip_lidar_num_ = 5;         // 每隔多少帧跳一个雷达

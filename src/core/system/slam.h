@@ -6,6 +6,7 @@
 #define LIGHTNING_SLAM_H
 
 #include <rclcpp/rclcpp.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <tf2_ros/transform_broadcaster.h>
@@ -21,6 +22,7 @@
 #include "common/eigen_types.h"
 #include "common/imu.h"
 #include "common/keyframe.h"
+#include "common/odom.h"
 
 namespace lightning {
 
@@ -72,6 +74,9 @@ class SlamSystem {
     /// 处理IMU
     void ProcessIMU(const lightning::IMUPtr& imu);
 
+    /// 处理轮速里程计（body系线速度，退化方向约束）
+    void ProcessOdom(const OdomPtr& odom);
+
     /// 处理点云
     void ProcessLidar(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud);
     void ProcessLidar(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud);
@@ -108,12 +113,14 @@ class SlamSystem {
     std::string imu_topic_;
     std::string cloud_topic_;
     std::string livox_topic_;
+    std::string odom_topic_;
     bool imu_in_g_ = false;
 
     rclcpp::CallbackGroup::SharedPtr imu_cb_group_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_ = nullptr;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_ = nullptr;
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr livox_sub_ = nullptr;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_ = nullptr;
 
     /// 点云发布到RViz
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr global_map_pub_ = nullptr;

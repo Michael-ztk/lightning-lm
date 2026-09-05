@@ -207,8 +207,12 @@ void ESKF::Update(ESKF::ObsType obs, const double& R) {
         /// 处理各类观测模型
         if (state_dim_ > dof_measurement) {
             Eigen::MatrixXd h_x_cur = Eigen::MatrixXd::Zero(dof_measurement, state_dim_);
-            h_x_cur.topLeftCorner(dof_measurement, 12) = custom_obs_model_.h_x_;
-            custom_obs_model_.R_ = R * Eigen::MatrixXd::Identity(dof_measurement, dof_measurement);
+            // h_x_ 列数：雷达观测为12维紧凑块(pos/rot/外参)；轮速等观测为23维全布局(含vel)
+            h_x_cur.topLeftCorner(dof_measurement, custom_obs_model_.h_x_.cols()) = custom_obs_model_.h_x_;
+            // Only assign default R_ if the observation function did not pre-fill it
+            if (custom_obs_model_.R_.rows() != dof_measurement || custom_obs_model_.R_.cols() != dof_measurement) {
+                custom_obs_model_.R_ = R * Eigen::MatrixXd::Identity(dof_measurement, dof_measurement);
+            }
 
             Eigen::MatrixXd K =
                 P_ * h_x_cur.transpose() * (h_x_cur * P_ * h_x_cur.transpose() + custom_obs_model_.R_).inverse();

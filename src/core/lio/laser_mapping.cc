@@ -29,6 +29,9 @@ bool LaserMapping::Init(const std::string &config_yaml) {
     eskf_options.max_iterations_ = fasterlio::NUM_MAX_ITERATIONS;
     eskf_options.epsi_ = 1e-3 * Eigen::Matrix<double, 23, 1>::Ones();
     eskf_options.lidar_obs_func_ = [this](NavState &s, ESKF::CustomObservationModel &obs) { ObsModel(s, obs); };
+    eskf_options.wheelspeed_obs_func_ = [this](NavState &s, ESKF::CustomObservationModel &obs) {
+        WheelSpeedModel(s, obs);
+    };
     eskf_options.use_aa_ = use_aa_;
     kf_.Init(eskf_options);
 
@@ -123,6 +126,28 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
             rayclean_max_range_ = 20.0;
         }
 
+        /// 轮速里程计融合参数（缺省时使用默认值）
+        odom_en_ = flio["odom_en"] ? flio["odom_en"].as<bool>() : odom_en_;
+        odom_vel_noise_ = flio["odom_vel_noise"] ? flio["odom_vel_noise"].as<double>() : odom_vel_noise_;
+        odom_pos_noise_floor_ =
+            flio["odom_pos_noise_floor"] ? flio["odom_pos_noise_floor"].as<double>() : odom_pos_noise_floor_;
+        odom_pos_noise_ratio_ =
+            flio["odom_pos_noise_ratio"] ? flio["odom_pos_noise_ratio"].as<double>() : odom_pos_noise_ratio_;
+        odom_max_time_diff_ =
+            flio["odom_max_time_diff"] ? flio["odom_max_time_diff"].as<double>() : odom_max_time_diff_;
+        odom_yaw_offset_ = flio["odom_yaw_offset"] ? flio["odom_yaw_offset"].as<double>() : odom_yaw_offset_;
+        // 底盘前进方向在 body 系里的单位向量：底盘系相对 body 系绕 z 转 odom_yaw_offset_
+        // 默认 0 时前进 = body +x；安装朝向 y后x左 时应配 -π/2（前进 = body -y）
+        fwd_body_ = Vec3d(std::cos(odom_yaw_offset_), std::sin(odom_yaw_offset_), 0.0);
+        if (odom_vel_noise_ <= 1e-4) {
+            LOG(WARNING) << "invalid odom_vel_noise=" << odom_vel_noise_ << ", use default 0.01";
+            odom_vel_noise_ = 0.01;
+        }
+        if (odom_pos_noise_floor_ <= 1e-4) {
+            LOG(WARNING) << "invalid odom_pos_noise_floor=" << odom_pos_noise_floor_ << ", use default 0.002";
+            odom_pos_noise_floor_ = 0.002;
+        }
+
     } catch (...) {
         LOG(ERROR) << "bad conversion";
         return false;
@@ -207,6 +232,20 @@ void LaserMapping::ProcessIMU(const lightning::IMUPtr &imu) {
     last_timestamp_imu_ = timestamp;
 
     imu_buffer_.emplace_back(imu);
+}
+
+void LaserMapping::ProcessOdom(const OdomPtr &odom) {
+    UL lock(mtx_buffer_);
+    if (odom->timestamp_ < last_timestamp_odom_) {
+        LOG(WARNING) << "odom loop back, drop this message";
+        return;
+    }
+
+    last_timestamp_odom_ = odom->timestamp_;
+    odom_buffer_.emplace_back(odom);
+    while (odom_buffer_.size() > 500) {
+        odom_buffer_.pop_front();
+    }
 }
 
 bool LaserMapping::Run() {
@@ -300,6 +339,60 @@ bool LaserMapping::Run() {
 
             kf_.Update(ESKF::ObsType::LIDAR, 1e-3);
             state_point_ = kf_.GetX();
+
+            // 轮速序贯紧耦合更新：雷达更新后，用body系线速度约束状态速度。
+            // 走廊等退化方向上雷达观测弱约束，轮速直接顶住该方向，防止位姿冻结/漂移
+            if (odom_en_) {
+                has_wheel_obs_ = false;
+                if (!measures_.odom_.empty()) {
+                    // 取时间最接近帧尾的轮速观测
+                    const OdomPtr &odom = measures_.odom_.back();
+                    double dt_odom = std::fabs(odom->timestamp_ - measures_.lidar_end_time_);
+                    if (dt_odom <= odom_max_time_diff_) {
+                        // 底盘只给前进速度 linear.x，前进方向在 body 系是 fwd_body_（由 odom_yaw_offset 派生）
+                        cur_wheel_vel_ = fwd_body_ * odom->linear.x();
+                        has_wheel_obs_ = true;
+
+                        // 位移增量基准 last_wheel_pos_ 是上一帧做完更新后的位置，时间基准是上一帧
+                        // 帧尾 lidar_end_time_，因此 dt 必须用帧尾时间差，不能再用 odom 戳差，
+                        // 否则 Δp 覆盖一个 lidar 帧周期、期望位移却只覆盖 odom 间隔，残差带系统偏置
+                        wheel_obs_dt_ = (last_wheel_time_ > 0) ? (measures_.lidar_end_time_ - last_wheel_time_) : 0.0;
+
+                        // 位移观测噪声：σ_pos² = σ_vel²·dt² + (k·|Δd|)²，再取下限
+                        //  - σ_vel²·dt²：速度噪声随积分时间传播（主导项）
+                        //  - (k·|Δd|)²：比例噪声，模型化轮径标度误差与打滑（误差随位移放大）
+                        //  - 下限：仅数值兜底（防止 dt→0 时方差为 0），取值应远小于基础项
+                        const double disp = std::fabs(cur_wheel_vel_.dot(fwd_body_)) * wheel_obs_dt_;
+                        const double pos_noise_base = odom_vel_noise_ * wheel_obs_dt_ * wheel_obs_dt_;
+                        const double pos_noise_scale = std::pow(odom_pos_noise_ratio_ * disp, 2);
+                        double pos_noise = std::max(pos_noise_base + pos_noise_scale,
+                                                    odom_pos_noise_floor_ * odom_pos_noise_floor_);
+                        const double R_wheel = (has_last_wheel_ && wheel_obs_dt_ > 1e-3) ? pos_noise : odom_vel_noise_;
+
+                        kf_.Update(ESKF::ObsType::WHEEL_SPEED, R_wheel);
+                        state_point_ = kf_.GetX();
+
+                        // 用本帧融合后的位置作为下一帧增量基准（必须取更新后的 state_point_）
+                        last_wheel_pos_ = state_point_.pos_;
+                        last_wheel_time_ = measures_.lidar_end_time_;
+                        has_last_wheel_ = true;
+
+                        static int odom_log_cnt = 0;
+                        if (odom_log_cnt++ % 100 == 0) {
+                            Vec3d v_w = state_point_.vel_;
+                            LOG(INFO) << "wheel odom fused: dt=" << dt_odom << "s obs_dt=" << wheel_obs_dt_
+                                      << "s v_meas=" << cur_wheel_vel_.dot(fwd_body_) << "m/s |v_state|=" << v_w.norm()
+                                      << "m/s mode=" << ((has_last_wheel_ && wheel_obs_dt_ > 1e-3) ? "delta" : "vel")
+                                      << " R=" << R_wheel;
+                        }
+                    } else {
+                        static int warn_cnt = 0;
+                        if (warn_cnt++ % 100 == 0) {
+                            LOG(WARNING) << "wheel odom too old: dt=" << dt_odom << "s, discard";
+                        }
+                    }
+                }
+            }
 
             if (keep_first_imu_estimation_ && all_keyframes_.size() < 5 &&
                 (old_state.rot_.inverse() * state_point_.rot_).log().norm() > 0.3 * M_PI / 180) {
@@ -514,6 +607,16 @@ bool LaserMapping::SyncPackages() {
         measures_.imu_.push_back(imu_buffer_.front());
 
         imu_buffer_.pop_front();
+    }
+
+    /*** push odom data within [lidar_begin_time_, lidar_end_time_] ***/
+    measures_.odom_.clear();
+    while (!odom_buffer_.empty() && odom_buffer_.front()->timestamp_ < measures_.lidar_begin_time_) {
+        odom_buffer_.pop_front();  // 过旧的直接丢弃
+    }
+    while (!odom_buffer_.empty() && odom_buffer_.front()->timestamp_ <= lidar_end_time_) {
+        measures_.odom_.emplace_back(odom_buffer_.front());
+        odom_buffer_.pop_front();
     }
 
     lidar_buffer_.pop_front();
@@ -740,6 +843,72 @@ void LaserMapping::ObsModel(NavState &s, ESKF::CustomObservationModel &obs) {
         // LOG(INFO) << "residual mean: " << obs.lidar_residual_mean_ << ", max: " << obs.lidar_residual_max_
         //           << ", 85%: " << res_sq2[res_sq2.size() * 0.85];
     }
+}
+
+/**
+ * 轮速观测模型（序贯紧耦合）—— 2 行：位移增量 + 前向速度
+ *
+ * 约定与 LIDAR 点面残差一致：residual = z - h(x)，H = ∂h/∂x。
+ *
+ * 行0（位移增量，约束位置块 idx 0）：
+ *   观测 z0 = v_body·dt（轮速推算位移），h0 = e_forwardᵀ·(p_cur - p_prev)（状态实际前向位移）
+ *   r0 = v_body·dt - e_forwardᵀ·Δp
+ *   ∂h0/∂δp = e_forwardᵀ；∂h0/∂δθ = -Δpᵀ·R·hat(fwd_body)
+ *   作用：雷达在退化方向钉死绝对位置时直接推动位置，打破冻结
+ *
+ * 行1（前向速度，约束速度块 idx 12）：
+ *   观测 z1 = v_body（轮速），h1 = e_forwardᵀ·v_world（状态速度的前向分量）
+ *   残差按 ×dt 换算到米，与行0同量纲共用标量噪声 R
+ *   r1 = dt·(v_body - e_forwardᵀ·v_world)
+ *   ∂h1/∂δv = dt·e_forwardᵀ；∂h1/∂δθ = dt·(fwd_body × v_body)
+ *   作用：走廊退化方向雷达看不到前进速度时直接顶住速度，防止速度状态塌陷
+ *
+ * 关键：e_forward = R·fwd_body，fwd_body 由 odom_yaw_offset 派生（安装朝向 y后x左 时
+ *   为 -π/2，即前进 = body -y）；行1 的旋转雅可比在纯直行时恒为 0，不会把侧向/垂向
+ *   速度压成 0 而耦合 yaw（旧 3D 速度模型的 49°突跳根源）。
+ *
+ * 首帧无上一帧位姿时 valid_=false，跳过本次观测更新，下一帧起才有位移增量基准。
+ */
+void LaserMapping::WheelSpeedModel(NavState &s, ESKF::CustomObservationModel &obs) {
+    if (!has_last_wheel_ || wheel_obs_dt_ <= 1e-3) {
+        obs.valid_ = false;  // 无上一帧增量基准，跳过本次轮速观测
+        return;
+    }
+
+    const int obs_dim = 2;
+    obs.h_x_ = Eigen::MatrixXd::Zero(obs_dim, NavState::dim);
+
+    const Mat3d R = s.rot_.matrix();
+    const Vec3d e_forward = R * fwd_body_;            // 车头方向（body 前进轴在世界系）
+    const Vec3d v_w = s.vel_;                         // 世界系速度
+    const Vec3d v_body = R.transpose() * v_w;         // body 系速度
+    const Vec3d delta_state = s.pos_ - last_wheel_pos_;
+    const double vx = cur_wheel_vel_.dot(fwd_body_);  // 轮速前向分量（标量）
+    const double dt = wheel_obs_dt_;
+
+    // 行0：位移增量残差 = 轮速位移 - 状态实际前向位移
+    const double measured_disp = e_forward.dot(delta_state);
+    const double expect_disp = vx * dt;
+
+    // 行1：前向速度残差（×dt 换算到米）= 轮速位移 - 状态速度前向分量·dt
+    const double measured_v_disp = dt * e_forward.dot(v_w);
+
+    obs.residual_.resize(obs_dim);
+    obs.residual_(0) = expect_disp - measured_disp;
+    obs.residual_(1) = expect_disp - measured_v_disp;
+
+    // 行0 雅可比
+    obs.h_x_.block<1, 3>(0, 0) = e_forward.transpose();                             // ∂h0/∂δp
+    obs.h_x_.block<1, 3>(0, 3) = -delta_state.transpose() * R * SO3::hat(fwd_body_);  // ∂h0/∂δθ
+
+    // 行1 雅可比
+    obs.h_x_.block<1, 3>(1, 12) = (dt * e_forward).transpose();  // ∂h1/∂δv
+    Vec3d dv_dtheta = fwd_body_.cross(v_body);                   // ∂h1/∂δθ
+    obs.h_x_.block<1, 3>(1, 3) = (dt * dv_dtheta).transpose();   // ∂h1/∂δθ
+
+    // 供日志/统计用
+    obs.lidar_residual_mean_ = std::fabs(obs.residual_(0)) + std::fabs(obs.residual_(1));
+    obs.lidar_residual_max_ = std::max(std::fabs(obs.residual_(0)), std::fabs(obs.residual_(1)));
 }
 
 ///////////////////////////  private method /////////////////////////////////////////////////////////////////////

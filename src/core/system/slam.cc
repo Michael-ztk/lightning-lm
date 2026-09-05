@@ -16,6 +16,7 @@
 #include <yaml-cpp/yaml.h>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <iomanip>
 #include <opencv2/opencv.hpp>
@@ -152,6 +153,23 @@ bool SlamSystem::Init(const std::string& yaml_path) {
                 Timer::Evaluate([&]() { ProcessLidar(cloud); }, "Proc Lidar", false);
             });
 
+        // 轮速里程计（可选话题）：底盘odom多为BestEffort发布（SensorDataQoS），
+        // 订阅端也用best_effort避免QoS不匹配告警/收不到数据
+        odom_topic_ = yaml["common"]["odom_topic"] ? yaml["common"]["odom_topic"].as<std::string>() : "";
+        if (!odom_topic_.empty()) {
+            rclcpp::QoS odom_qos = rclcpp::QoS(rclcpp::KeepLast(10)).best_effort();
+            odom_sub_ = node_->create_subscription<nav_msgs::msg::Odometry>(
+                odom_topic_, odom_qos, [this](nav_msgs::msg::Odometry::SharedPtr msg) {
+                    // 轮速里程计：只用twist线速度（body系），pose漂移不可靠不使用
+                    OdomPtr odom = std::make_shared<Odom>();
+                    odom->timestamp_ = ToSec(msg->header.stamp);
+                    odom->linear =
+                        Vec3d(msg->twist.twist.linear.x, msg->twist.twist.linear.y, msg->twist.twist.linear.z);
+                    ProcessOdom(odom);
+                });
+            LOG(INFO) << "odom subscriber created, topic: " << odom_topic_;
+        }
+
         savemap_service_ = node_->create_service<SaveMapService>(
             "lightning/save_map", [this](const SaveMapService::Request::SharedPtr& req,
                                          SaveMapService::Response::SharedPtr res) { SaveMap(req, res); });
@@ -250,6 +268,26 @@ void SlamSystem::SaveMap(const std::string& path) {
     // 保存被射线清洗过滤的动态点，用于误删检查
     lio_->SaveRayRemovedCloud(save_path);
 
+    // 导出TUM格式轨迹（LIO与回环优化后各一份），供evo评估对比
+    {
+        auto kfs = lio_->GetAllKeyframes();
+        std::ofstream f_lio(save_path + "/traj_lio.txt", std::ios::trunc);
+        std::ofstream f_opt(save_path + "/traj_opt.txt", std::ios::trunc);
+        f_lio << std::fixed << std::setprecision(6);
+        f_opt << std::fixed << std::setprecision(6);
+        for (const auto& kf : kfs) {
+            double t = kf->GetState().timestamp_;
+            auto write_one = [](std::ofstream& f, double ts, const SE3& pose) {
+                const auto& q = pose.unit_quaternion();
+                f << ts << " " << pose.translation().x() << " " << pose.translation().y() << " "
+                  << pose.translation().z() << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << "\n";
+            };
+            write_one(f_lio, t, kf->GetLIOLidarPose());
+            write_one(f_opt, t, kf->GetOptLidarPose());
+        }
+        LOG(INFO) << "trajectories saved: " << save_path << "/traj_lio.txt, traj_opt.txt (" << kfs.size() << " kfs)";
+    }
+
     if (options_.with_gridmap_) {
         /// 使用优化后的位姿重建栅格地图
         g2p5_->RedrawGlobalMap();
@@ -324,6 +362,13 @@ void SlamSystem::ProcessIMU(const lightning::IMUPtr& imu) {
         return;
     }
     lio_->ProcessIMU(imu);
+}
+
+void SlamSystem::ProcessOdom(const OdomPtr& odom) {
+    if (running_ == false) {
+        return;
+    }
+    lio_->ProcessOdom(odom);
 }
 
 void SlamSystem::ProcessLidar(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) {
