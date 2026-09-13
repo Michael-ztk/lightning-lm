@@ -214,10 +214,25 @@ void ESKF::Update(ESKF::ObsType obs, const double& R) {
                 custom_obs_model_.R_ = R * Eigen::MatrixXd::Identity(dof_measurement, dof_measurement);
             }
 
-            Eigen::MatrixXd K =
-                P_ * h_x_cur.transpose() * (h_x_cur * P_ * h_x_cur.transpose() + custom_obs_model_.R_).inverse();
-            K_r = K * custom_obs_model_.residual_;
-            K_H = K * h_x_cur;
+            // legacy 模式（wheel_full_cov_update_=false）：完整还原移植前的轮速更新路径，
+            // 含 K 的原始求解式——数值实现差异在退化场景会被放大，必须逐位还原才能复现旧行为。
+            // 注：cr101@ece11e8 的轮速卡方软拒绝实测为负优化（轮速系统偏差使残差系统性偏大，
+            // 门限压制有效更新），已移除；如需可参照 rk100 同提交找回
+            const bool legacy_wheel = obs == ObsType::WHEEL_SPEED && !wheel_full_cov_update_;
+
+            if (!legacy_wheel) {
+                const Eigen::MatrixXd S = h_x_cur * P_ * h_x_cur.transpose() + custom_obs_model_.R_;
+
+                // K = P H^T S^-1 = (S^-1 H P)^T, P/S 对称, LDLT 求解避免显式求逆
+                Eigen::MatrixXd K = (S.ldlt().solve(h_x_cur * P_)).transpose();
+                K_r = K * custom_obs_model_.residual_;
+                K_H = K * h_x_cur;
+            } else {
+                Eigen::MatrixXd K = P_ * h_x_cur.transpose() *
+                                    (h_x_cur * P_ * h_x_cur.transpose() + custom_obs_model_.R_).inverse();
+                K_r = K * custom_obs_model_.residual_;
+                K_H = K * h_x_cur;
+            }
         } else {
             /// 纯雷达观测
             double R_inv = 1.0 / (R * dof_measurement);
@@ -340,7 +355,14 @@ void ESKF::Update(ESKF::ObsType obs, const double& R) {
                 }
             }
 
-            P_ = L_ - K_H.block<23, 12>(0, 0) * P_.template block<12, 23>(0, 0);
+            // 协方差更新形式可选：完整 K_H*P（数学正确，轮速速度协方差正常收缩）或
+            // 旧 block 形式（轮速更新不收缩速度协方差——等效恒定增益速度跟踪，
+            // 对轮径系统偏差/模型失配更鲁棒，长走廊实测更准）
+            if (wheel_full_cov_update_) {
+                P_ = L_ - K_H * P_;
+            } else {
+                P_ = L_ - K_H.block<23, 12>(0, 0) * P_.template block<12, 23>(0, 0);
+            }
 
             break;
         }

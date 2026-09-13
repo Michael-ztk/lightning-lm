@@ -126,6 +126,11 @@ void G2P5::RenderBack() {
             UL lock(frontend_mutex_);
             if (frontend_current_ != nullptr) {
                 while (true) {
+                    // 退出时前端不再推进，此循环必须可退出，否则 join 永久阻塞（死锁）
+                    if (quit_flag_) {
+                        break;
+                    }
+
                     Keyframe::Ptr frontend_kf = nullptr;
                     {
                         frontend_kf = frontend_current_;
@@ -280,21 +285,13 @@ G2P5MapPtr G2P5::GetNewestMap() {
 
 void G2P5::Convert3DTo2DScan(Keyframe::Ptr kf, G2P5MapPtr &map) {
     // 3D转2D算法
-    if (options_.esti_floor_) {
-        if (!DetectPlaneCoeffs(kf)) {
-            /// 如果动态检测失败，就用之前的参数
-            floor_coeffs_ = Vec4d(0, 0, 1, -options_.default_floor_height_);
-        } else {
-            // if (options_.verbose_) {
-            //     LOG(INFO) << "floor coeffs: " << floor_coeffs_.transpose();
-            // }
-        }
-    } else {
-        floor_coeffs_ = Vec4d(0, 0, 1, -options_.default_floor_height_);
-    }
-
+    // 世界系离地高过滤（同源障碍物点云）：Z_ground 取关键帧里程计 z + 默认地面高，
+    // 替代 RANSAC 地面估计/车体系过滤 —— 坡道上两者都会把斜面误判为障碍，世界系高不受姿态影响
     SE3 Twb = kf->GetOptLidarPose();
     Vec3d orig = Twb.translation();
+    double Z_ground = orig.z() + options_.default_floor_height_;
+    // mode2(360射线) 的 rays/SetWhitePoints 仍用车体系离地高，保留地面方程供其换算
+    floor_coeffs_ = Vec4d(0, 0, 1, -options_.default_floor_height_);
 
     double min_th = options_.min_th_floor_;
     double max_th = options_.max_th_floor_;
@@ -309,18 +306,18 @@ void G2P5::Convert3DTo2DScan(Keyframe::Ptr kf, G2P5MapPtr &map) {
             if (quit_flag_) return;
 
             Vec3d pc = Vec3d(pt.x, pt.y, pt.z);
-            Vec4d pn = Vec4d(pt.x, pt.y, pt.z, 1);
 
             Vec2d p = pc.head<2>();
             double dis = p.norm();
             if (dis > options_.usable_scan_range_ || dis <= 0.01) continue;
 
-            double dis_floor = pn.dot(floor_coeffs_);
+            Vec3d p_world = Twb * pc;
+            double dis_world = p_world.z() - Z_ground;
 
-            if (dis_floor > min_th && dis_floor < max_th) {
-                Vec3d p_world = Twb * pc;
-                map->SetHitPoint(p_world[0], p_world[1], true, dis_floor);
-                map->SetMissPoint(p_world[0], p_world[1], orig[0], orig[1], dis_floor, options_.lidar_height_);
+            if (dis_world > min_th && dis_world < max_th) {
+                float h_above_lidar = p_world.z() - orig.z();
+                map->SetHitPoint(p_world[0], p_world[1], true, h_above_lidar);
+                map->SetMissPoint(p_world[0], p_world[1], orig[0], orig[1], h_above_lidar, options_.lidar_height_);
             }
         }
     } else {
@@ -343,11 +340,15 @@ void G2P5::Convert3DTo2DScan(Keyframe::Ptr kf, G2P5MapPtr &map) {
             double dangle = atan2(p[1], p[0]) * constant::kRAD2DEG;
             int angle = int(round(dangle) + 360) % 360;
 
-            if (dis_floor > min_th && dis_floor < max_th) {
+            // 命中分类用世界系离地高（坡道鲁棒）；rays 里仍存车体系离地高，供 SetWhitePoints 作局部 z
+            Vec3d p_world = Twb * pc;
+            double dis_world = p_world.z() - Z_ground;
+
+            if (dis_world > min_th && dis_world < max_th) {
                 rays[angle].insert({dis, dis_floor});
-                Vec3d p_world = Twb * pc;
-                map->SetHitPoint(p_world[0], p_world[1], true, dis_floor);
-            } else if (dis_floor > -min_th) {
+                float h_above_lidar = p_world.z() - orig.z();
+                map->SetHitPoint(p_world[0], p_world[1], true, h_above_lidar);
+            } else if (dis_world > -min_th) {
                 rays[angle].insert({dis, dis_floor});
             }
         }

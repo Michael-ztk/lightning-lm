@@ -33,6 +33,7 @@ bool LaserMapping::Init(const std::string &config_yaml) {
         WheelSpeedModel(s, obs);
     };
     eskf_options.use_aa_ = use_aa_;
+    eskf_options.wheel_full_cov_update_ = wheel_full_cov_update_;
     kf_.Init(eskf_options);
 
     return true;
@@ -136,6 +137,7 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         odom_max_time_diff_ =
             flio["odom_max_time_diff"] ? flio["odom_max_time_diff"].as<double>() : odom_max_time_diff_;
         odom_yaw_offset_ = flio["odom_yaw_offset"] ? flio["odom_yaw_offset"].as<double>() : odom_yaw_offset_;
+        wheel_full_cov_update_ = flio["wheel_full_cov_update"] ? flio["wheel_full_cov_update"].as<bool>() : wheel_full_cov_update_;
         // 底盘前进方向在 body 系里的单位向量：底盘系相对 body 系绕 z 转 odom_yaw_offset_
         // 默认 0 时前进 = body +x；安装朝向 y后x左 时应配 -π/2（前进 = body -y）
         fwd_body_ = Vec3d(std::cos(odom_yaw_offset_), std::sin(odom_yaw_offset_), 0.0);
@@ -866,10 +868,10 @@ void LaserMapping::ObsModel(NavState &s, ESKF::CustomObservationModel &obs) {
  * 关键：e_forward = R·fwd_body，fwd_body 由 odom_yaw_offset 派生（安装朝向 y后x左 时
  *   为 -π/2，即前进 = body -y）。
  *
- * 姿态雅可比（∂/∂δθ）刻意置零：轮速存在轮径标度误差时（实测本底盘约-2%），
- *   平地上残差被强观测的位置吸收，但坡道段 ∂h0/∂δθ=-(RᵀΔp)_z≠0 会把里程差
- *   泄入pitch（正反馈→z漂移），转弯段航向项同理泄入yaw。姿态完全交给IMU/雷达，
- *   轮速仍顶住退化方向的位置/速度，长走廊xy收益不受影响。
+ * 姿态雅可比（∂/∂δθ）刻意置零：轮速存在系统性比例误差时（bag实测 twist 积分比真值
+ *   路径多报~2.8%，主要为转弯打滑），平地上残差被强观测的位置吸收，但坡道段
+ *   ∂h0/∂δθ=-(RᵀΔp)_z≠0 会把里程差泄入pitch（正反馈→z漂移），转弯段航向项同理
+ *   泄入yaw。姿态完全交给IMU/雷达，轮速仍顶住退化方向的位置/速度，长走廊xy收益不受影响。
  *
  * 首帧无上一帧位姿时 valid_=false，跳过本次观测更新，下一帧起才有位移增量基准。
  */
@@ -901,7 +903,7 @@ void LaserMapping::WheelSpeedModel(NavState &s, ESKF::CustomObservationModel &ob
     obs.residual_(1) = expect_disp - measured_v_disp;
 
     // 位移/速度观测只约束位置与速度块，不约束姿态块：
-    // 轮速存在轮径标度误差时（实测本底盘约-2%），平地上残差被强观测的位置吸收，
+    // 轮速存在系统性比例误差时，平地上残差被强观测的位置吸收，
     // 但坡道段 ∂h0/∂δθ=-(RᵀΔp)_z≠0 会把里程差泄入pitch（正反馈→z漂移），
     // 转弯段航向项同理泄入yaw。清零姿态雅可比后姿态完全由IMU/雷达约束，
     // 轮速仍顶住退化方向的位置/速度，长走廊xy收益不受影响。

@@ -236,6 +236,8 @@ class LaserMapping {
     double odom_pos_noise_ratio_ = 0.05;   // 位移观测的比例噪声(无量纲)，模型化轮径误差/打滑
     double odom_max_time_diff_ = 0.2;      // 轮速与帧尾时间最大允许偏差(s)
     double odom_yaw_offset_ = 0.0;         // 底盘系相对IMU系的yaw偏移(rad)
+    bool wheel_full_cov_update_ = false;   // 轮速协方差更新形式：false=旧block形式（不收缩速度协方差，长走廊
+                                           // 实测更准，见 config 注释）；true=完整K_H*P（cr101@60197ff）
     Vec3d cur_wheel_vel_ = Vec3d::Zero();               // 当帧轮速观测（body系）
     Vec3d fwd_body_ = Vec3d(1.0, 0.0, 0.0);             // body系车头方向单位向量，由 odom_yaw_offset 派生
     bool has_wheel_obs_ = false;                        // 当帧是否有可用轮速观测

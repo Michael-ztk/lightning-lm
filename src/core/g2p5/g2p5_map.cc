@@ -253,12 +253,10 @@ nav_msgs::msg::OccupancyGrid G2P5Map::ToROS() {
     occu_map.info.origin.position.y = min_y_;
 
     int grid_map_size = occu_map.info.width * occu_map.info.height;
-    int grid_map_size_1 = grid_map_size - 1;
     occu_map.data.resize(grid_map_size);
 
     std::fill(occu_map.data.begin(), occu_map.data.end(), -1);
     int tmp_area = 0;
-    int index_min, index_max;
 
     for (int bxi = 0; bxi < grid_size_x_; ++bxi) {
         for (int byi = 0; byi < grid_size_y_; ++byi) {
@@ -283,18 +281,18 @@ nav_msgs::msg::OccupancyGrid G2P5Map::ToROS() {
                         float occ = (float)hit_cnt / (float)visit_cnt;
 
                         /// 注意这里有转置符号
-                        if (occ > options_.occupancy_ratio_ && visit_cnt > 3) {
+                        if (occ > options_.occupancy_ratio_) {
                             tmp_area++;
                             occu_map.data[MapIdx(image_width, x, y)] = 100;
                         } else {
-                            int index = MapIdx(image_width, x, y);
-                            index_min = std::max(0, index - 1);
-                            index_max = std::min(grid_map_size_1, index + 1);
-
-                            for (auto extend = index_min; extend <= index_max; extend++) {
-                                if (occu_map.data[extend] < 0) {  //-1
+                            // 膨胀只在 x 方向 ±1（y 已由外层遍历覆盖），index±1 会跨行污染相邻行
+                            int x_min = std::max(0, x - 1);
+                            int x_max = std::min(image_width - 1, x + 1);
+                            for (int ex = x_min; ex <= x_max; ex++) {
+                                int idx = MapIdx(image_width, ex, y);
+                                if (occu_map.data[idx] < 0) {  //-1
                                     tmp_area++;
-                                    occu_map.data[extend] = 0;
+                                    occu_map.data[idx] = 0;
                                 }
                             }
                         }
