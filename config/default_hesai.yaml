@@ -1,11 +1,11 @@
-# Hesai CR100/JT128 配置（基于 livox 配置修改）
+# Hesai CR100/JT128 配置
 common:
   dataset: "hesai"
   lidar_topic: "/livox/lidar"
   livox_lidar_topic: "/livox/lidar_raw"
   imu_topic: "/livox/imu"
   imu_in_g: true
-  odom_topic: "/diff_chassis_driver/odom"  # 轮速里程计话题（留空则不订阅）
+  odom_topic: "/diff_chassis_driver/odom"  # 轮速里程计话题
 
 # fasterlio 参数
 fasterlio:
@@ -15,9 +15,9 @@ fasterlio:
   time_scale: 1e-3             # 兼容不同数据集的时间单位，仅对Velodyne LiDAR(lidar_type=2)生效
 
   skip_lidar_num: 0 # 点云的跳帧情况
-  point_filter_num: 1 # 点云采样参数
+  point_filter_num: 3 # 点云采样参数，影响关键帧->回环中源点云个数
   max_iteration: 6 # 最大迭代次数
-  filter_size_scan: 0.3 # 对scan进行的降采样
+  filter_size_scan: 0.5 # 对scan进行的降采样
   filter_size_map: 0.5
 
   ivox_grid_resolution: 0.5        # default=0.2
@@ -64,8 +64,8 @@ fasterlio:
 
   # 轮速里程计融合（序贯紧耦合：雷达观测更新后单独做一次轮速位移增量观测更新）
   odom_en: true
-  odom_vel_noise: 0.01        # 轮速线速度观测噪声 (m/s)^2，σ=0.1m/s
-  odom_pos_noise_floor: 0.002 # 位移观测噪声下限(m)，仅数值兜底，应远小于基础噪声σ_vel·dt
+  odom_vel_noise: 0.01        # 轮速线速度观测噪声 (m/s)^2, σ=0.1m/s. 位移观测噪声 R = max((odom_pos_noise_ratio·disp)², floor²), 本项仅在首帧无增量基准时作兜底
+  odom_pos_noise_floor: 0.002 # 位移观测噪声下限(m)，disp→0 时的数值兜底，应远小于比例项典型值
   odom_pos_noise_ratio: 0.05  # 位移观测的比例噪声(无量纲)，模型化轮径标度误差/打滑
   odom_max_time_diff: 0.2     # 轮速与帧尾时间最大允许偏差(s)，超过弃用该帧轮速
   odom_yaw_offset: -1.5708    # 底盘前进方向在body系的yaw角(rad)；安装朝向 y后x左 => 前进=body -y => -π/2
@@ -87,6 +87,7 @@ system:
   with_2dui: false # 是否需要2D UI
   with_g2p5: true # 是否需要栅格地图
   step_on_kf: false # 是否在关键帧处暂停
+  save_lio_result: false # 是否导出前端结果
   publish_map_to_rviz: true # 是否发布地图到RViz
   map_publish_interval: 2.0 # 地图发布间隔(秒)
   pub_registered_scan: false # 发布对齐后的当前帧点云
