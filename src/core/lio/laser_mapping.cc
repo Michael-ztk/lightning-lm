@@ -907,6 +907,7 @@ void LaserMapping::WheelSpeedModel(NavState &s, ESKF::CustomObservationModel &ob
     const Mat3d R = s.rot_.matrix();
     const Vec3d e_forward = R * fwd_body_;            // 车头方向（body 前进轴在世界系）
     const Vec3d v_w = s.vel_;                         // 世界系速度
+    const Vec3d v_body = R.transpose() * v_w;         // body 系速度
     const Vec3d delta_state = s.pos_ - last_wheel_pos_;
     const double vx = cur_wheel_vel_.dot(fwd_body_);  // 轮速前向分量（标量）
     const double dt = wheel_obs_dt_;
@@ -922,13 +923,15 @@ void LaserMapping::WheelSpeedModel(NavState &s, ESKF::CustomObservationModel &ob
     obs.residual_(0) = expect_disp - measured_disp;
     obs.residual_(1) = expect_disp - measured_v_disp;
 
-    // 位移/速度观测只约束位置与速度块，不约束姿态块：
-    // 轮速存在系统性比例误差时，平地上残差被强观测的位置吸收，
-    // 但坡道段 ∂h0/∂δθ=-(RᵀΔp)_z≠0 会把里程差泄入pitch（正反馈→z漂移），
-    // 转弯段航向项同理泄入yaw。清零姿态雅可比后姿态完全由IMU/雷达约束，
-    // 轮速仍顶住退化方向的位置/速度，长走廊xy收益不受影响。
-    obs.h_x_.block<1, 3>(0, 0) = e_forward.transpose();  // ∂h0/∂δp
-    obs.h_x_.block<1, 3>(1, 12) = (dt * e_forward).transpose();  // ∂h1/∂δv
+    // 行0 雅可比：位移观测对姿态的偏导 ∂h0/∂δθ = -Δpᵀ·R·[fwd]×
+    // （车头朝向转了，同样的机身位移在世界系前向分量就不同，这一项就是那个耦合）
+    obs.h_x_.block<1, 3>(0, 0) = e_forward.transpose();                                    // ∂h0/∂δp
+    obs.h_x_.block<1, 3>(0, 3) = -delta_state.transpose() * R * SO3::hat(fwd_body_);       // ∂h0/∂δθ
+
+    // 行1 雅可比：∂h1/∂δv = dt·e_forwardᵀ, ∂h1/∂δθ = dt·(fwd × v_body)ᵀ
+    obs.h_x_.block<1, 3>(1, 12) = (dt * e_forward).transpose();                            // ∂h1/∂δv
+    Vec3d dv_dtheta = fwd_body_.cross(v_body);                                             // ∂h1/∂δθ
+    obs.h_x_.block<1, 3>(1, 3) = (dt * dv_dtheta).transpose();
 
     // 供日志/统计用
     obs.lidar_residual_mean_ = std::fabs(obs.residual_(0)) + std::fabs(obs.residual_(1));
