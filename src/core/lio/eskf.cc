@@ -4,6 +4,8 @@
 
 #include "core/lio/eskf.hpp"
 
+#include <Eigen/Eigenvalues>
+
 namespace lightning {
 
 void ESKF::Predict(const double& dt, const ESKF::ProcessNoiseType& Q, const Vec3d& gyro, const Vec3d& acce) {
@@ -243,6 +245,90 @@ void ESKF::Update(ESKF::ObsType obs, const double& R) {
         // dx = Kr + (KH-I) dx
         dx_current = K_r + (K_H - Eigen::Matrix<double, 23, 23>::Identity()) * dx_current;
 
+        // ==================== 雷达退化检测与处理 ====================
+        // 参考 ct-lio 的 checkLocalizability: 用参与匹配的法向量分布做退化检测。
+        // Htt = H^T H 的平移块 = Σ n_i n_i^T, 其最小特征值 = 法向量矩阵最小奇异值的平方,
+        // 该值偏小说明这个方向的法向量分布"平坦"→ 该方向不可观(长走廊/稀疏区典型)。
+        // ct-lio 只检测不处理, 这里往前走一步:
+        //   1) 把修正量投影到可观测子空间(不可观方向不吃修正, 交给 IMU/轮速)
+        //   2) 修正量硬限幅兜底(匹配落错误局部极小时, 实测单帧偏航修正可达 -57°)
+        if ((obs == ObsType::LIDAR || obs == ObsType::WHEEL_SPEED_AND_LIDAR) && custom_obs_model_.h_x_.cols() >= 12 &&
+            custom_obs_model_.h_x_.rows() >= 10) {
+            const Eigen::MatrixXd& Hd = custom_obs_model_.h_x_;
+            const Eigen::Matrix3d Htt = Hd.leftCols(3).transpose() * Hd.leftCols(3);
+            const Eigen::Matrix3d Hrr = Hd.middleCols(3, 3).transpose() * Hd.middleCols(3, 3);
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es_tt(Htt);
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es_rr(Hrr);
+            const bool ok_tt = (es_tt.info() == Eigen::Success);
+            const bool ok_rr = (es_rr.info() == Eigen::Success);
+
+            // λ_min / λ_avg 低于阈值 → 该方向退化
+            constexpr double kDegRatio = 0.10;
+            bool deg_tt = false, deg_rr = false;
+            if (ok_tt) {
+                double avg = Htt.trace() / 3.0;
+                deg_tt = es_tt.eigenvalues()(0) < kDegRatio * (avg > 1e-12 ? avg : 1e-12);
+            }
+            if (ok_rr) {
+                double avg = Hrr.trace() / 3.0;
+                deg_rr = es_rr.eigenvalues()(0) < kDegRatio * (avg > 1e-12 ? avg : 1e-12);
+            }
+
+            Vec3d dp = dx_current.block<3, 1>(0, 0);
+            Vec3d dr = dx_current.block<3, 1>(3, 0);
+            if (deg_tt) {
+                const Vec3d v0 = es_tt.eigenvectors().col(0);  // 不可观平移方向
+                dp -= v0 * v0.dot(dp);
+            }
+            if (deg_rr) {
+                const Vec3d v0 = es_rr.eigenvectors().col(0);  // 不可观旋转方向
+                dr -= v0 * v0.dot(dr);
+            }
+            dx_current.block<3, 1>(0, 0) = dp;
+            dx_current.block<3, 1>(3, 0) = dr;
+
+            // 硬限幅兜底: 等比缩放, 保留修正方向但限制幅度
+            constexpr double kMaxPosCorr = 0.5;   // m/帧
+            constexpr double kMaxRotCorr = 0.10;  // rad/帧 (~5.7°)
+            const double pos_n = dp.norm();
+            const double rot_n = dr.norm();
+            double scale = 1.0;
+            if (pos_n > kMaxPosCorr) scale = kMaxPosCorr / pos_n;
+            if (rot_n > kMaxRotCorr && kMaxRotCorr / rot_n < scale) scale = kMaxRotCorr / rot_n;
+            if (scale < 1.0) { dx_current *= scale; }
+
+            // 统计: 每 50 次调用汇总一次退化/限幅发生率与特征值（默认停用，需要复看发生率时放开）
+            /*
+            static int deg_cnt = 0;
+            static int deg_tt_cnt = 0, deg_rr_cnt = 0, sat_cnt = 0;
+            static double min_ratio_tt = 1e30, min_ratio_rr = 1e30;
+            static double max_pos_corr = 0, max_rot_corr = 0;
+            deg_cnt++;
+            if (deg_tt) deg_tt_cnt++;
+            if (deg_rr) deg_rr_cnt++;
+            if (scale < 1.0) sat_cnt++;
+            if (ok_tt) {
+                double r = es_tt.eigenvalues()(0) / (Htt.trace() / 3.0 > 1e-12 ? Htt.trace() / 3.0 : 1e-12);
+                if (r < min_ratio_tt) min_ratio_tt = r;
+            }
+            if (ok_rr) {
+                double r = es_rr.eigenvalues()(0) / (Hrr.trace() / 3.0 > 1e-12 ? Hrr.trace() / 3.0 : 1e-12);
+                if (r < min_ratio_rr) min_ratio_rr = r;
+            }
+            if (pos_n > max_pos_corr) max_pos_corr = pos_n;
+            if (rot_n > max_rot_corr) max_rot_corr = rot_n;
+            if (deg_cnt % 50 == 0) {
+                LOG(WARNING) << "[DEG] n=" << deg_cnt << " deg_tt=" << deg_tt_cnt << " deg_rr=" << deg_rr_cnt
+                             << " sat=" << sat_cnt << " | minRatio tt=" << min_ratio_tt
+                             << " rr=" << min_ratio_rr << " | maxCorr pos=" << max_pos_corr
+                             << "m rot=" << max_rot_corr * 57.29578 << "deg";
+                deg_tt_cnt = deg_rr_cnt = sat_cnt = 0;
+                min_ratio_tt = min_ratio_rr = 1e30;
+                max_pos_corr = max_rot_corr = 0;
+            }
+            */
+        }
+
         // check nan
         for (int j = 0; j < 23; ++j) {
             if (std::isnan(dx_current(j, 0))) {
@@ -342,6 +428,16 @@ void ESKF::Update(ESKF::ObsType obs, const double& R) {
             }
 
             P_ = L_ - K_H * P_;
+
+            // 数值保护：P=(I-KH)P 非 Joseph 形式且 L_/P_ 混用会产生非对称矩阵，使下一次
+            // S=HPH^T+R 失去正定，K 溢出、状态发散。此处对称化并钳制最小特征值，保证 P 半正定。
+            constexpr double kCovEigenFloor = 1e-10;
+            P_ = (0.5 * (P_ + P_.transpose())).eval();
+            Eigen::SelfAdjointEigenSolver<CovType> cov_es(P_);
+            if (cov_es.info() == Eigen::Success && cov_es.eigenvalues().minCoeff() < kCovEigenFloor) {
+                P_ = cov_es.eigenvectors() * cov_es.eigenvalues().cwiseMax(kCovEigenFloor).asDiagonal() *
+                     cov_es.eigenvectors().transpose();
+            }
 
             break;
         }
