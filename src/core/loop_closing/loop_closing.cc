@@ -171,7 +171,7 @@ void LoopClosing::ComputeLoopCandidates() {
 
 void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
     LOG(INFO) << "aligning " << c.idx1_ << " with " << c.idx2_;
-    const int target_submap_idx_range = 40;
+    const int target_submap_idx_range = 16;
     const int target_submap_stride = 4;
     const int source_submap_idx_range = std::max(0, options_.source_submap_idx_range_);
     const int source_submap_stride = std::max(1, options_.source_submap_stride_);
