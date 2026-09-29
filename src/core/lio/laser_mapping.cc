@@ -360,15 +360,13 @@ bool LaserMapping::Run() {
                         // 否则 Δp 覆盖一个 lidar 帧周期、期望位移却只覆盖 odom 间隔，残差带系统偏置
                         wheel_obs_dt_ = (last_wheel_time_ > 0) ? (measures_.lidar_end_time_ - last_wheel_time_) : 0.0;
 
-                        // 位移观测噪声：σ_pos² = σ_vel²·dt² + (k·|Δd|)²，再取下限
-                        //  - σ_vel²·dt²：速度噪声随积分时间传播（主导项）
-                        //  - (k·|Δd|)²：比例噪声，模型化轮径标度误差与打滑（误差随位移放大）
-                        //  - 下限：仅数值兜底（防止 dt→0 时方差为 0），取值应远小于基础项
+                        // 位移观测噪声：σ_pos = max(k·|Δd|, floor)，只保留随位移增长的乘性项。
+                        // σ_vel²·dt² 常数项会把 R 由 floor²=4e-6 抬到 ~2.6e-5，轮速单帧权威从 ~21%
+                        // 跌到 ~4%，长走廊段因此出现速度停摆；比例项已覆盖轮径标度误差与打滑。
                         const double disp = std::fabs(cur_wheel_vel_.dot(fwd_body_)) * wheel_obs_dt_;
-                        const double pos_noise_base = odom_vel_noise_ * wheel_obs_dt_ * wheel_obs_dt_;
                         const double pos_noise_scale = std::pow(odom_pos_noise_ratio_ * disp, 2);
-                        double pos_noise = std::max(pos_noise_base + pos_noise_scale,
-                                                    odom_pos_noise_floor_ * odom_pos_noise_floor_);
+                        const double pos_noise = std::max(pos_noise_scale,
+                                                          odom_pos_noise_floor_ * odom_pos_noise_floor_);
                         const double R_wheel = (has_last_wheel_ && wheel_obs_dt_ > 1e-3) ? pos_noise : odom_vel_noise_;
 
                         kf_.Update(ESKF::ObsType::WHEEL_SPEED, R_wheel);
