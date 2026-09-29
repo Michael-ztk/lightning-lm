@@ -257,6 +257,13 @@ bool LaserMapping::Run() {
     /// IMU process, kf prediction, undistortion
     p_imu_->Process(measures_, kf_, scan_undistort_);
 
+    // 兜底: IMU 缺失时 Process 提前返回, scan_undistort_ 仍是上一帧残留点云(未做本帧运动补偿),
+    // 若继续配准等于用错误点云更新状态。此帧直接丢弃。
+    if (measures_.imu_.empty()) {
+        LOG(WARNING) << "no imu for this scan, drop frame (refuse to match non-undistorted cloud)";
+        return false;
+    }
+
     if (scan_undistort_->empty() || (scan_undistort_ == nullptr)) {
         LOG(WARNING) << "No point, skip this scan!";
         return false;
@@ -594,6 +601,22 @@ bool LaserMapping::SyncPackages() {
     }
 
     /*** push imu_ data, and pop from imu_ buffer ***/
+    // 守卫: 必须存在"覆盖本帧结束时刻"的 IMU 数据(缓冲首元素不晚于 lidar_end_time_)。
+    // 若缓冲首元素已晚于 lidar_end_time_, 说明覆盖本帧的 IMU 已在之前的同步中被消耗掉,
+    // measures_.imu_ 将为空 -> Process 跳过去畸变但仍继续配准(点云运动未补偿) -> 系统性偏差,
+    // 且哪几帧遭此待遇取决于数据到达时序 -> 同一输入跑两次结果不同(重影)。
+    // 处理: 丢弃本帧(绝不带着空 IMU 继续)。
+    if (imu_buffer_.empty() || imu_buffer_.front()->timestamp > lidar_end_time_) {
+        LOG(WARNING) << "[lidar_time] imu covering this scan is missing (already consumed), drop scan. "
+                     << "imu_buf_size=" << imu_buffer_.size() << " " << std::setprecision(14)
+                     << ", front_ts=" << (imu_buffer_.empty() ? -1.0 : imu_buffer_.front()->timestamp)
+                     << ", lidar_end_time=" << lidar_end_time_;
+        lidar_buffer_.pop_front();
+        time_buffer_.pop_front();
+        lidar_pushed_ = false;
+        return false;
+    }
+
     double imu_time = imu_buffer_.front()->timestamp;
     measures_.imu_.clear();
     while ((!imu_buffer_.empty()) && (imu_time < lidar_end_time_)) {

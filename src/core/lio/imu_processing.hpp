@@ -230,6 +230,10 @@ inline void ImuProcess::UndistortPcl(const MeasureGroup &meas, ESKF &kf_state, C
 
         if (dt > 0.1) {
             LOG(ERROR) << "get abnormal dt: " << dt;
+            // IMU 退化: gap 期间用状态速度匀速外推补位, 保留 break(下游帧尾预测不变)
+            auto st = kf_state.GetX();
+            st.pos_ += st.vel_ * dt;
+            kf_state.ChangeX(st);
             kf_state.SetTime((*it_imu)->timestamp);
             break;
         }

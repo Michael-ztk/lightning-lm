@@ -110,8 +110,11 @@ bool SlamSystem::Init(const std::string& yaml_path) {
         rclcpp::QoS qos(10);
         // qos.best_effort();
 
+        // IMU 订阅队列 depth 100 (=0.5s @200Hz)。原值 10 在 2x 回放/短暂停摆时丢采样，实测丢 ~1%
+        // 即可让走廊段轨迹偏移 ~10cm 且逐轮不可复现；100 与 1000 的结果逐位一致，故取 100。
+        rclcpp::QoS imu_qos = rclcpp::QoS(rclcpp::KeepLast(100)).reliable();
         imu_sub_ = node_->create_subscription<sensor_msgs::msg::Imu>(
-            imu_topic_, qos, [this](sensor_msgs::msg::Imu::SharedPtr msg) {
+            imu_topic_, imu_qos, [this](sensor_msgs::msg::Imu::SharedPtr msg) {
                 IMUPtr imu = std::make_shared<IMU>();
                 imu->timestamp = ToSec(msg->header.stamp);
                 imu->linear_acceleration =
