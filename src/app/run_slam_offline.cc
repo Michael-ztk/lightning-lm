@@ -58,6 +58,16 @@ int main(int argc, char** argv) {
     } catch (const std::exception &) {
     }
 
+    /// livox CustomMsg 话题（不同数据集话题名不同，如 /livox/mid360/lidar）
+    std::string livox_topic;
+    try {
+        livox_topic = yaml.GetValue<std::string>("common", "livox_lidar_topic");
+    } catch (const std::exception &) {
+    }
+    if (livox_topic.empty()) {
+        livox_topic = "/livox/lidar";
+    }
+
     rosbag
         /// IMU 的处理
         .AddImuHandle(imu_topic,
@@ -73,7 +83,7 @@ int main(int argc, char** argv) {
                                   return true;
                               })
         /// livox 的处理
-        .AddLivoxCloudHandle("/livox/lidar",
+        .AddLivoxCloudHandle(livox_topic,
                              [&slam](livox_ros_driver2::msg::CustomMsg::SharedPtr cloud) {
                                  slam.ProcessLidar(cloud);
                                  return true;
