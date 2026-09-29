@@ -209,10 +209,7 @@ void ESKF::Update(ESKF::ObsType obs, const double& R) {
             Eigen::MatrixXd h_x_cur = Eigen::MatrixXd::Zero(dof_measurement, state_dim_);
             // h_x_ 列数：雷达观测为12维紧凑块(pos/rot/外参)；轮速等观测为23维全布局(含vel)
             h_x_cur.topLeftCorner(dof_measurement, custom_obs_model_.h_x_.cols()) = custom_obs_model_.h_x_;
-            // Only assign default R_ if the observation function did not pre-fill it
-            if (custom_obs_model_.R_.rows() != dof_measurement || custom_obs_model_.R_.cols() != dof_measurement) {
-                custom_obs_model_.R_ = R * Eigen::MatrixXd::Identity(dof_measurement, dof_measurement);
-            }
+            custom_obs_model_.R_ = R * Eigen::MatrixXd::Identity(dof_measurement, dof_measurement);
 
             // legacy 模式（wheel_full_cov_update_=false）：完整还原移植前的轮速更新路径，
             // 含 K 的原始求解式——数值实现差异在退化场景会被放大，必须逐位还原才能复现旧行为。
