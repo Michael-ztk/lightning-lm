@@ -33,7 +33,6 @@ bool LaserMapping::Init(const std::string &config_yaml) {
         WheelSpeedModel(s, obs);
     };
     eskf_options.use_aa_ = use_aa_;
-    eskf_options.wheel_full_cov_update_ = wheel_full_cov_update_;
     kf_.Init(eskf_options);
 
     return true;
@@ -137,7 +136,6 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         odom_max_time_diff_ =
             flio["odom_max_time_diff"] ? flio["odom_max_time_diff"].as<double>() : odom_max_time_diff_;
         odom_yaw_offset_ = flio["odom_yaw_offset"] ? flio["odom_yaw_offset"].as<double>() : odom_yaw_offset_;
-        wheel_full_cov_update_ = flio["wheel_full_cov_update"] ? flio["wheel_full_cov_update"].as<bool>() : wheel_full_cov_update_;
         // 底盘前进方向在 body 系里的单位向量：底盘系相对 body 系绕 z 转 odom_yaw_offset_
         // 默认 0 时前进 = body +x；安装朝向 y后x左 时应配 -π/2（前进 = body -y）
         fwd_body_ = Vec3d(std::cos(odom_yaw_offset_), std::sin(odom_yaw_offset_), 0.0);

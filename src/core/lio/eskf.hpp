@@ -72,9 +72,6 @@ class ESKF {
         int max_iterations_ = 4;
         StateVecType epsi_;    // 收敛条件
         bool use_aa_ = false;  // use anderson accleration
-        bool wheel_full_cov_update_ = false;  // false: P_ = L_ - K_H.block<23,12>*P_.block<12,23>（旧形式，长走廊实测更准）
-                                             // false: P_ = L_ - K_H.block<23,12>*P_.block<12,23>（旧形式，
-                                             // 轮速更新不收缩速度协方差，走廊场景实测更鲁棒）
     };
 
     /// 初始化
@@ -87,7 +84,6 @@ class ESKF {
         maximum_iter_ = options.max_iterations_;
         limit_ = options.epsi_;
         use_aa_ = options.use_aa_;
-        wheel_full_cov_update_ = options.wheel_full_cov_update_;
     }
 
     /// IMU预测
@@ -137,7 +133,6 @@ class ESKF {
 
     /// anderson acceleration?
     bool use_aa_ = false;
-    bool wheel_full_cov_update_ = false;
     AndersonAcceleration<double, state_dim_, 10> aa_;
 };
 
