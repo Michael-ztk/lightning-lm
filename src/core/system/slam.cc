@@ -255,7 +255,9 @@ void SlamSystem::SaveMap(const std::string& path) {
     lio_->RemoveDynamicByKeyframeRays();
 
     // auto global_map_no_loop = lio_->GetGlobalMap(true);
-    auto global_map = lio_->GetGlobalMap(!options_.with_loop_closing_);
+    // 全局点云地图保存分辨率(m)，低于此已小于雷达在 15~20 m 外的点间距，再细只是稀疏点不合并
+    constexpr float kGlobalMapVoxel = 0.03f;
+    auto global_map = lio_->GetGlobalMap(!options_.with_loop_closing_, true, kGlobalMapVoxel);
     // auto global_map_raw = lio_->GetGlobalMap(!options_.with_loop_closing_, false, 0.1);
 
     TiledMap::Options tm_options;
