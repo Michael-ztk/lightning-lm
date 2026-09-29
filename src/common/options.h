@@ -95,7 +95,7 @@ namespace fasterlio {
 /// fixed params
 constexpr double INIT_TIME = 0.1;
 constexpr int NUM_MATCH_POINTS = 5;      // required matched points in current
-constexpr int MIN_NUM_MATCH_POINTS = 3;  // minimum matched points in current
+constexpr int MIN_NUM_MATCH_POINTS = 5;  // minimum matched points in current (3点拟合平面残差恒为0,阈值检查形同虚设,会产任意法向假平面)
 
 /// configurable params
 extern int NUM_MAX_ITERATIONS;      // max iterations of ekf

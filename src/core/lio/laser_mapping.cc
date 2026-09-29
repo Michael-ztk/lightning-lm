@@ -757,7 +757,8 @@ void LaserMapping::ObsModel(NavState &s, ESKF::CustomObservationModel &obs) {
                     temp[3] = 1.0;
                     float pd2 = plane_coef_[i].dot(temp);
 
-                    bool valid_corr = p_body.norm() > 81 * pd2 * pd2;
+                    // 硬门: 错位状态下按√d/9放宽会把错误平面点全部保留(拉力源), 仿ct-lio固定0.3m绝对距离拒绝错配
+                    bool valid_corr = p_body.norm() > 81 * pd2 * pd2 && std::fabs(pd2) < 0.3f;
                     if (valid_corr) {
                         point_selected_surf_[i] = true;
                         residuals_[i] = pd2;
