@@ -6,6 +6,7 @@
 #define LIGHTNING_SLAM_H
 
 #include <rclcpp/rclcpp.hpp>
+#include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -53,6 +54,8 @@ class SlamSystem {
         bool with_visualization_ = true;    // 是否需要可视化UI
         bool with_2dvisualization_ = true;  // 是否需要2D可视化UI
 
+        bool save_lio_result_ = false;  // 是否导出前端结果（轨迹/全局点云/栅格图），用于与后端结果对比定位误差来源
+
         bool step_on_kf_ = true;  // 是否在关键帧处暂停p
     };
 
@@ -90,6 +93,9 @@ class SlamSystem {
     void PublishTF(const SE3& pose);
     void PublishVisualizationLoop();
     void UpdateVisualizationCaches();
+
+    /// 把栅格图写成pgm（free=白 occupied=黑 unknown=灰，y轴翻转）
+    static bool WriteGridPgm(const nav_msgs::msg::OccupancyGrid& map, const std::string& pgm_path);
 
     /// ros端保存地图的实现
     void SaveMap(const SaveMapService::Request::SharedPtr request, SaveMapService::Response::SharedPtr response);

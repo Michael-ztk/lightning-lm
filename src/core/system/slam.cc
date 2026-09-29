@@ -41,6 +41,7 @@ bool SlamSystem::Init(const std::string& yaml_path) {
     options_.with_2dvisualization_ = yaml["system"]["with_2dui"].as<bool>();
     options_.with_gridmap_ = yaml["system"]["with_g2p5"].as<bool>();
     options_.step_on_kf_ = yaml["system"]["step_on_kf"].as<bool>();
+    options_.save_lio_result_ = yaml["system"]["save_lio_result"].as<bool>(false);
 
     if (options_.with_loop_closing_) {
         LOG(INFO) << "slam with loop closing";
@@ -268,11 +269,49 @@ void SlamSystem::SaveMap(const std::string& path) {
     // pcl::io::savePCDFileBinaryCompressed(save_path + "/global_no_loop.pcd", *global_map_no_loop);
     // pcl::io::savePCDFileBinaryCompressed(save_path + "/global_raw.pcd", *global_map_raw);
 
+    // 前端位姿点云 global_lio.pcd，与后端位姿的 global.pcd 对比，用于区分前端漂移与后端优化不足
+    if (options_.save_lio_result_ && options_.with_loop_closing_) {
+        auto global_map_lio = lio_->GetGlobalMap(true, true, kGlobalMapVoxel);
+        pcl::io::savePCDFileBinaryCompressed(save_path + "/global_lio.pcd", *global_map_lio);
+    }
+
     // 保存被射线清洗过滤的动态点，用于误删检查
     lio_->SaveRayRemovedCloud(save_path);
 
+    // 先用前端(LIO)位姿重建栅格图存为 map_lio.pgm，再走下方正常流程存 OptPose 的 map.pgm，
+    // 两图对比定位重影来源：前端漂移(两图都重影) or 后端优化不足(仅 map.pgm 重影) or 后端引入(仅 map_lio 重影)
+    if (options_.save_lio_result_ && options_.with_gridmap_ && options_.with_loop_closing_) {
+        auto kfs_diag = lio_->GetAllKeyframes();
+        std::vector<SE3> opt_backup;
+        opt_backup.reserve(kfs_diag.size());
+        for (const auto& kf : kfs_diag) {
+            opt_backup.push_back(kf->GetOptLidarPose());
+            kf->SetOptLidarPose(kf->GetLIOLidarPose());
+        }
+
+        g2p5_->RedrawGlobalMap();
+        /// 后台线程最多 sleep(1) 才看到flag，给它最长10s开始；未开始就跳过，避免空等
+        for (int w = 0; w < 100 && !g2p5_->IsBusy(); ++w) {
+            usleep(100000);
+        }
+        while (g2p5_->IsBusy()) {
+            usleep(100000);
+        }
+
+        if (auto lio_grid = g2p5_->GetNewestMap()) {
+            auto grid = lio_grid->ToROS();
+            if (WriteGridPgm(grid, save_path + "/map_lio.pgm")) {
+                LOG(INFO) << "front-end grid map saved: " << save_path << "/map_lio.pgm";
+            }
+        }
+
+        for (size_t i = 0; i < kfs_diag.size(); ++i) {
+            kfs_diag[i]->SetOptLidarPose(opt_backup[i]);
+        }
+    }
+
     // 导出TUM格式轨迹（LIO与回环优化后各一份），供evo评估对比
-    {
+    if (options_.save_lio_result_) {
         auto kfs = lio_->GetAllKeyframes();
         std::ofstream f_lio(save_path + "/traj_lio.txt", std::ios::trunc);
         std::ofstream f_opt(save_path + "/traj_opt.txt", std::ios::trunc);
@@ -305,26 +344,7 @@ void SlamSystem::SaveMap(const std::string& path) {
 
         /// 存为ROS兼容的模式
         auto map = g2p5_->GetNewestMap()->ToROS();
-        const int width = map.info.width;
-        const int height = map.info.height;
-
-        cv::Mat nav_image(height, width, CV_8UC1);
-        for (int y = 0; y < height; ++y) {
-            const int rowStartIndex = y * width;
-            for (int x = 0; x < width; ++x) {
-                const int index = rowStartIndex + x;
-                int8_t data = map.data[index];
-                if (data == 0) {                                   // Free
-                    nav_image.at<uchar>(height - 1 - y, x) = 255;  // White
-                } else if (data == 100) {                          // Occupied
-                    nav_image.at<uchar>(height - 1 - y, x) = 0;    // Black
-                } else {                                           // Unknown
-                    nav_image.at<uchar>(height - 1 - y, x) = 128;  // Gray
-                }
-            }
-        }
-
-        cv::imwrite(save_path + "/map.pgm", nav_image);
+        WriteGridPgm(map, save_path + "/map.pgm");
 
         /// yaml
         std::ofstream yamlFile(save_path + "/map.yaml");
@@ -358,6 +378,33 @@ void SlamSystem::SaveMap(const std::string& path) {
     }
 
     LOG(INFO) << "map saved";
+}
+
+bool SlamSystem::WriteGridPgm(const nav_msgs::msg::OccupancyGrid& map, const std::string& pgm_path) {
+    const int width = map.info.width;
+    const int height = map.info.height;
+    if (width <= 0 || height <= 0) {
+        LOG(WARNING) << "empty grid map, skip " << pgm_path;
+        return false;
+    }
+
+    cv::Mat nav_image(height, width, CV_8UC1);
+    for (int y = 0; y < height; ++y) {
+        const int row_start_index = y * width;
+        for (int x = 0; x < width; ++x) {
+            int8_t data = map.data[row_start_index + x];
+            if (data == 0) {                                   // Free
+                nav_image.at<uchar>(height - 1 - y, x) = 255;  // White
+            } else if (data == 100) {                          // Occupied
+                nav_image.at<uchar>(height - 1 - y, x) = 0;    // Black
+            } else {                                           // Unknown
+                nav_image.at<uchar>(height - 1 - y, x) = 128;  // Gray
+            }
+        }
+    }
+
+    cv::imwrite(pgm_path, nav_image);
+    return true;
 }
 
 void SlamSystem::ProcessIMU(const lightning::IMUPtr& imu) {
