@@ -16,6 +16,10 @@ add_definitions("-DPCL_NO_PRECOMPILE")
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC -fopenmp -fPIC -g")
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS} -O2 -fopenmp -fPIC -g -ggdb")
+# LTO：与 rk100 构建配置对齐（rk100 用 -O2 + LTO）。
+# 回环 NDT 的浮点结果对跨编译单元内联敏感：关闭 LTO 时边缘候选（如 3↔158）
+# 的匹配概率会从 ~1.33 掉到 ~0.88，使同一数据集在阈值附近随机通过/失败。
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS} -ggdb -g -fopenmp -fPIC -g")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC -g")
 

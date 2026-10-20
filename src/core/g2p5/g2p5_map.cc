@@ -152,11 +152,18 @@ void G2P5Map::SetMissPoint(const float &point_x, const float &point_y, const flo
         return;
     }
 
-    int point_x_index = floor(point_x / options_.resolution_);
-    int point_y_index = floor(point_y / options_.resolution_);
-
-    int xi_lidar = floor(laser_origin_x / options_.resolution_);
-    int yi_lidar = floor(laser_origin_y / options_.resolution_);
+    // 栅格索引必须相对地图原点 min_x_/min_y_ 计算（与 SetHitPoint/GetDataIndex 一致）。
+    // 原实现直接用绝对世界坐标 floor(x / resolution)，当 min_x_ != 0（Resize 对齐后几乎
+    // 总是如此，例如 -18/-35）时索引会整体偏移 min_x_/resolution 格，射线路径（free-space
+    // 清除）全部写错位置：障碍物未被正确清除，栅格图上出现虚假障碍或拖影。
+    int point_x_index = 0, point_y_index = 0;
+    int xi_lidar = 0, yi_lidar = 0;
+    if (!GetDataIndex(point_x, point_y, point_x_index, point_y_index)) {
+        return;
+    }
+    if (!GetDataIndex(laser_origin_x, laser_origin_y, xi_lidar, yi_lidar)) {
+        return;
+    }
 
     float k = 0;
     int sign = 1;
@@ -165,10 +172,6 @@ void G2P5Map::SetMissPoint(const float &point_x, const float &point_y, const flo
 
     /// 整数的直线填充算法
     if (diff_y == 0 && diff_x == 0) {
-        return;
-    }
-
-    if (!GetDataIndex(laser_origin_x, laser_origin_y, xi_lidar, yi_lidar)) {
         return;
     }
 

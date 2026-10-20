@@ -26,7 +26,10 @@ class Keyframe {
     }
 
     unsigned long GetID() const { return id_; }
-    CloudPtr GetCloud() const { return cloud_; }
+    CloudPtr GetCloud() const {
+        UL lock(data_mutex_);
+        return cloud_;
+    }
 
     /// 替换关键帧点云（保存地图前的动态残影清洗会用）
     void SetCloud(CloudPtr cloud) {
@@ -90,7 +93,7 @@ class Keyframe {
     double timestamp_ = 0;
     CloudPtr cloud_ = nullptr;  /// 降采样之后的点云
 
-    std::mutex data_mutex_;
+    mutable std::mutex data_mutex_;
     SE3 pose_lio_body_;
     SE3 pose_opt_body_;
 

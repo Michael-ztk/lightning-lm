@@ -64,12 +64,19 @@ void PointCloudPreprocess::Process(const livox_ros_driver2::msg::CustomMsg::Shar
                 // use curvature as time of each laser points, curvature unit: ms
                 cloud_full_[i].time = msg->points[i].offset_time / double(1000000);
 
-                if ((abs(cloud_full_[i].x - cloud_full_[i - 1].x) > 1e-7) ||
-                    (abs(cloud_full_[i].y - cloud_full_[i - 1].y) > 1e-7) ||
-                    (abs(cloud_full_[i].z - cloud_full_[i - 1].z) > 1e-7) &&
-                        (cloud_full_[i].x * cloud_full_[i].x + cloud_full_[i].y * cloud_full_[i].y +
-                             cloud_full_[i].z * cloud_full_[i].z >
-                         (blind_ * blind_))) {
+                // 括号必须把「任一轴有变化」整体括起来再与「超出盲区」做 AND：
+                // && 的优先级高于 ||，缺外层括号时表达式退化成
+                // (dx变化) || (dy变化) || (dz变化 && 超出盲区)，
+                // 于是 x/y 方向有任何微小变化就通过，盲区(blind=1.5m)内的近距离点
+                // 被错误保留，直接影响位姿与姿态估计精度。与 rk100 实现对齐。
+                const double dx = cloud_full_[i].x - cloud_full_[i - 1].x;
+                const double dy = cloud_full_[i].y - cloud_full_[i - 1].y;
+                const double dz = cloud_full_[i].z - cloud_full_[i - 1].z;
+                const double dist_sq = cloud_full_[i].x * cloud_full_[i].x +
+                                       cloud_full_[i].y * cloud_full_[i].y +
+                                       cloud_full_[i].z * cloud_full_[i].z;
+                if ((std::abs(dx) > 1e-7 || std::abs(dy) > 1e-7 || std::abs(dz) > 1e-7) &&
+                    dist_sq > blind_ * blind_) {
                     is_valid_pt[i] = 1;
                 }
             }

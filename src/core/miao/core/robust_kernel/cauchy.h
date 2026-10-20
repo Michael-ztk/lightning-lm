@@ -20,7 +20,8 @@ namespace lightning::miao {
 class RobustKernelCauchy : public RobustKernel {
    public:
     virtual void Robustify(double e2, Vector3& rho) const override {
-        double dsqr = delta_ * delta_;
+        constexpr double eps = 1e-12;  // 数值保护：防止 delta=0 导致除零或 NaN
+        double dsqr = delta_ * delta_ + eps;
         double dsqrReci = 1. / dsqr;
         double aux = dsqrReci * e2 + 1.0;
 

@@ -5,6 +5,7 @@
 #pragma once
 
 #include <glog/logging.h>
+#include <atomic>
 #include <condition_variable>
 #include <functional>
 #include <mutex>
@@ -65,8 +66,11 @@ class AsyncMessageProcess {
     std::mutex mutex_;
     std::condition_variable cv_msg_;
     std::deque<T> msg_buffer_;
-    bool update_flag_ = false;
-    bool exit_flag_ = false;
+    // 工作线程与调用线程（AddMessage/Quit）无锁并发访问，必须用原子量：
+    // 非原子 bool 的数据竞争是 UB，且编译器可能把 exit_flag_ 缓存在寄存器中，
+    // 使 ProcLoop 的 while (!exit_flag_) 永不退出、join() 永久阻塞。
+    std::atomic_bool update_flag_{false};
+    std::atomic_bool exit_flag_{false};
     size_t max_size_ = 40;
     std::string name_;
 
@@ -92,8 +96,8 @@ AsyncMessageProcess<T>::AsyncMessageProcess(AsyncMessageProcess::ProcFunc proc_f
 
 template <typename T>
 void AsyncMessageProcess<T>::Start() {
-    exit_flag_ = false;
-    update_flag_ = false;
+    exit_flag_.store(false);
+    update_flag_.store(false);
     proc_ = std::thread([this]() { ProcLoop(); });
 }
 
@@ -101,7 +105,7 @@ template <typename T>
 void AsyncMessageProcess<T>::ProcLoop() {
     while (!exit_flag_) {
         UL lock(mutex_);
-        cv_msg_.wait(lock, [this]() { return update_flag_; });
+        cv_msg_.wait(lock, [this]() { return update_flag_.load() || exit_flag_.load(); });
 
         // take the message and process it
         auto buffer = msg_buffer_;
@@ -119,7 +123,7 @@ void AsyncMessageProcess<T>::ProcLoop() {
 template <typename T>
 void AsyncMessageProcess<T>::AddMessage(const T& msg) {
     UL lock(mutex_);
-    if (enable_skip_) {
+    if (enable_skip_ && skip_num_ > 0) {
         if (skip_cnt_ != 0) {
             skip_cnt_++;
             skip_cnt_ = skip_cnt_ % skip_num_;
@@ -142,9 +146,14 @@ void AsyncMessageProcess<T>::AddMessage(const T& msg) {
 
 template <typename T>
 void AsyncMessageProcess<T>::Quit() {
-    update_flag_ = true;
-    exit_flag_ = true;
-    cv_msg_.notify_one();
+    // 持锁写入标志：AddMessage/ProcLoop 均在锁内访问它们，锁外写会构成数据竞争。
+    // notify_all 以唤醒可能存在的多个等待者。
+    {
+        UL lock(mutex_);
+        update_flag_.store(true);
+        exit_flag_.store(true);
+    }
+    cv_msg_.notify_all();
 
     if (proc_.joinable()) {
         proc_.join();
