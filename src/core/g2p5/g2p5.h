@@ -96,6 +96,11 @@ class G2P5 {
     /// 查看是否仍然有没绘制完的关键帧
     bool IsBusy() { return is_busy_; }
 
+    /// 已完成的重绘次数（单调递增）。用计数而非 is_busy_ 忙标志判断"重绘是否完成"：
+    /// is_busy_ 是瞬时脉冲，短数据集渲染只需几十毫秒，调用方 100ms 轮询会整体错过
+    /// true->false 的窗口，误判为"重绘未启动"（825 这类短序列必现）。
+    uint64_t GetRenderCount() const { return render_count_.load(); }
+
    private:
     /// 在已有的map上增加一些关键帧
     bool AddKfToMap(const std::vector<Keyframe::Ptr> &kfs, G2P5MapPtr &map);
@@ -139,6 +144,7 @@ class G2P5 {
     /// 后端相关
     std::thread draw_backend_map_thread_;           // 后端重绘的线程
     std::atomic_bool backend_redraw_flag_ = false;  // 后端重绘的flag
+    std::atomic<uint64_t> render_count_{0};         // 后端重绘完成次数
     G2P5MapPtr backend_map_ = nullptr;              // 正在绘制的地图
 
     Vec4d floor_coeffs_ = Vec4d(0, 0, 1.0, 1.0);  // 地面方程参数

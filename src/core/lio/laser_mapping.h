@@ -98,9 +98,16 @@ class LaserMapping {
     /// 获取激光的状态
     NavState GetState() const { return state_point_; }
 
+    /// 当前雷达缓冲深度（用于上层判断是否需要丢弃新输入以追上实时）
+    size_t GetLidarBufferSize() const {
+        UL lock(mtx_buffer_);
+        return lidar_buffer_.size();
+    }
+
     /// 获取IMU状态
     NavState GetIMUState() const {
         if (p_imu_->IsIMUInited()) {
+            std::lock_guard<std::mutex> lock(mtx_kf_imu_);
             return kf_imu_.GetX();
         } else {
             NavState s;
@@ -212,7 +219,8 @@ class LaserMapping {
     std::vector<char> point_selected_surf_;  // selected points
     std::vector<Vec4f> plane_coef_;          // plane coeffs
 
-    std::mutex mtx_buffer_;
+    // mutable: GetLidarBufferSize() is const but needs to lock lidar_buffer_
+    mutable std::mutex mtx_buffer_;
     std::deque<double> time_buffer_;
 
     std::deque<PointCloudType::Ptr> lidar_buffer_;
@@ -269,6 +277,7 @@ class LaserMapping {
 
     ESKF kf_;      // 点云时刻的IMU状态
     ESKF kf_imu_;  // imu 最新时刻的eskf状态
+    mutable std::mutex mtx_kf_imu_;  // 保护 kf_imu_ 的互斥锁
 
     NavState state_point_;  // ekf current state
 

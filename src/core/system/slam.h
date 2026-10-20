@@ -12,6 +12,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <atomic>
+#include <deque>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -113,6 +114,7 @@ class SlamSystem {
     std::shared_ptr<g2p5::G2P5> g2p5_ = nullptr;        // 栅格地图
 
     Keyframe::Ptr cur_kf_ = nullptr;
+    std::mutex cur_kf_mutex_;  // 保护 cur_kf_ 的并发访问
 
     /// 实时模式下的ros2 node, subscribers
     rclcpp::Node::SharedPtr node_;
@@ -144,6 +146,10 @@ class SlamSystem {
     SE3 latest_registered_scan_pose_;
     uint64_t latest_registered_scan_seq_ = 0;
     CloudPtr global_map_cache_{new PointCloudType()};
+    // 待做体素滤波+变换的关键帧队列。重活从点云回调移到可视化线程，
+    // 避免在 mtx_buffer_ 持锁路径上做 PCL 运算阻塞 IMU 回调（实测阻塞达 130ms，
+    // 导致 IMU 丢包 header_dt=0.109 与姿态精度下降）。
+    std::deque<Keyframe::Ptr> pending_viz_kfs_;
     uint64_t global_map_cache_seq_ = 0;
     bool global_map_needs_full_replace_ = false;
     std::atomic_ulong latest_kf_id_for_viz_{0};

@@ -163,12 +163,15 @@ void G2P5::RenderBack() {
             newest_map_ = frontend_map_;
         }
 
+        /// 标记本轮重绘完成（供调用方以计数方式等待，避免错过瞬时忙标志）
+        render_count_.fetch_add(1);
+        is_busy_ = false;
+
         /// 向外回调
         if (map_update_cb_) {
             map_update_cb_(newest_map_);
         }
 
-        is_busy_ = false;
     }
 
     LOG(INFO) << "backend render quit";
@@ -249,11 +252,14 @@ bool G2P5::ResizeMap(const std::vector<Keyframe::Ptr> &kfs, G2P5MapPtr &map) {
         max_x = (max_x < init_max_x) ? init_max_x : max_x;
         max_y = (max_y < init_max_y) ? init_max_y : max_y;
 
-        float r = map->GetGridResolution();
-        min_x = static_cast<int>((floor)(min_x / r)) * r;
-        min_y = static_cast<int>((floor)(min_y / r)) * r;
-        max_x = static_cast<int>((ceil)(max_x / r)) * r;
-        max_y = static_cast<int>((ceil)(max_y / r)) * r;
+        // 边界必须对齐到「子网格块宽」而不是单格分辨率：G2P5Map::Resize 按 16x16 子网格
+        // 整块搬移旧数据，块内偏移无法表达。若只对齐到单格(0.05m)，块偏移会被 round 取整
+        // 丢掉，旧地图整体错位（最大半块 0.4m），表现为墙体错位/重影。
+        const float block = map->GetGridResolution() * (1 << G2P5Map::SUB_GRID_SIZE);
+        min_x = (floor)(min_x / block) * block;
+        min_y = (floor)(min_y / block) * block;
+        max_x = (ceil)(max_x / block) * block;
+        max_y = (ceil)(max_y / block) * block;
         map->Resize(min_x, min_y, max_x, max_y);
 
         // LOG(INFO) << "map resized to " << min_x << ", " << min_y << ", " << max_x << ", " << max_y;

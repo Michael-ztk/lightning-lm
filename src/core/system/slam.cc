@@ -14,6 +14,7 @@
 #include <pcl/filters/voxel_grid.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <yaml-cpp/yaml.h>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -126,8 +127,9 @@ bool SlamSystem::Init(const std::string& yaml_path) {
                     imu->linear_acceleration *= 9.81;
                 }
 
-                static double last_imu_header_time = -1.0;
-                static auto last_imu_callback_wall_time = std::chrono::steady_clock::time_point{};
+                // 使用 thread_local 避免多线程竞争（每个线程独立计数）
+                thread_local double last_imu_header_time = -1.0;
+                thread_local auto last_imu_callback_wall_time = std::chrono::steady_clock::time_point{};
                 const auto now_wall_time = std::chrono::steady_clock::now();
                 const double header_dt = last_imu_header_time > 0 ? (imu->timestamp - last_imu_header_time) : 0.0;
                 const double callback_wall_dt =
@@ -228,7 +230,15 @@ void SlamSystem::WaitForUIExit() {
 
 void SlamSystem::SaveMap(const SaveMapService::Request::SharedPtr request,
                          SaveMapService::Response::SharedPtr response) {
-    map_name_ = request->map_id;
+    // 路径安全校验：防止路径穿越攻击
+    std::string sanitized_name = request->map_id;
+    if (sanitized_name.find("..") != std::string::npos || sanitized_name.find('\0') != std::string::npos) {
+        LOG(ERROR) << "invalid map name: contains unsafe characters";
+        response->response = -1;
+        return;
+    }
+
+    map_name_ = sanitized_name;
     std::string save_path = "./data/" + map_name_ + "/";
 
     SaveMap(save_path);
@@ -236,19 +246,18 @@ void SlamSystem::SaveMap(const SaveMapService::Request::SharedPtr request,
 }
 
 void SlamSystem::SaveMap(const std::string& path) {
+    // 空指针检查
+    if (!lio_) {
+        LOG(ERROR) << "cannot save map: LIO not initialized";
+        return;
+    }
+
     std::string save_path = path;
     if (save_path.empty()) {
         save_path = "./data/" + map_name_ + "/";
     }
 
     LOG(INFO) << "slam map saving to " << save_path;
-
-    if (!std::filesystem::exists(save_path)) {
-        std::filesystem::create_directories(save_path);
-    } else {
-        std::filesystem::remove_all(save_path);
-        std::filesystem::create_directories(save_path);
-    }
 
     // 射线free-space清洗：位姿已最终确定（回环优化后），在导出前用全部关键帧的视线证据
     // 清除动态残影（行人等）与孤立噪点，直接改写关键帧点云，点云图与栅格图同时变干净
@@ -260,11 +269,33 @@ void SlamSystem::SaveMap(const std::string& path) {
     auto global_map = lio_->GetGlobalMap(!options_.with_loop_closing_, true, kGlobalMapVoxel);
     // auto global_map_raw = lio_->GetGlobalMap(!options_.with_loop_closing_, false, 0.1);
 
+    auto kfs_all = lio_->GetAllKeyframes();
+    if (kfs_all.empty()) {
+        LOG(ERROR) << "cannot save map: no keyframes available";
+        return;
+    }
+    // ConvertFromFullPCD() 内部断言地图非空：Debug 构建会直接中止进程，
+    // Release 下断言被编译掉，会静默产出一张空的分块地图。这里提前拦截。
+    if (!global_map || global_map->empty()) {
+        LOG(ERROR) << "cannot save map: global map is empty";
+        return;
+    }
+
+    // ===== 校验通过后才允许改动磁盘 =====
+    // 下面会先清空目标目录，任何可能失败的校验都必须排在它前面，
+    // 否则"保存失败"会连带把旧地图删掉（不可逆的数据丢失）。
+    if (!std::filesystem::exists(save_path)) {
+        std::filesystem::create_directories(save_path);
+    } else {
+        std::filesystem::remove_all(save_path);
+        std::filesystem::create_directories(save_path);
+    }
+
     TiledMap::Options tm_options;
     tm_options.map_path_ = save_path;
 
     TiledMap tm(tm_options);
-    SE3 start_pose = lio_->GetAllKeyframes().front()->GetOptLidarPose();
+    SE3 start_pose = kfs_all.front()->GetOptLidarPose();
     tm.ConvertFromFullPCD(global_map, start_pose, save_path);
 
     pcl::io::savePCDFileBinaryCompressed(save_path + "/global.pcd", *global_map);
@@ -283,6 +314,10 @@ void SlamSystem::SaveMap(const std::string& path) {
     // 先用前端(LIO)位姿重建栅格图存为 map_lio.pgm，再走下方正常流程存 OptPose 的 map.pgm，
     // 两图对比定位重影来源：前端漂移(两图都重影) or 后端优化不足(仅 map.pgm 重影) or 后端引入(仅 map_lio 重影)
     if (options_.save_lio_result_ && options_.with_gridmap_ && options_.with_loop_closing_) {
+        // 本工程（lightning-lm）的 G2P5 没有 SetKeyframes 接口，栅格重建直接读取其内部
+        // 关键帧列表，因此只能沿用"临时把 OptPose 换成 LIO 位姿、重建后再还原"的方式。
+        // 注意其固有风险：还原会覆盖期间回环线程写入的新优化结果；中途抛异常会跳过还原。
+        // 这里仅补上等待超时，避免后端线程异常时无限阻塞保存流程。
         auto kfs_diag = lio_->GetAllKeyframes();
         std::vector<SE3> opt_backup;
         opt_backup.reserve(kfs_diag.size());
@@ -293,11 +328,27 @@ void SlamSystem::SaveMap(const std::string& path) {
 
         g2p5_->RedrawGlobalMap();
         /// 后台线程最多 sleep(1) 才看到flag，给它最长10s开始；未开始就跳过，避免空等
+        constexpr int kMaxWaitStartMs = 10000;  // 10秒等待启动
+        constexpr int kMaxWaitBusyMs = 30000;   // 30秒等待完成
+        int waited_ms = 0;
+
         for (int w = 0; w < 100 && !g2p5_->IsBusy(); ++w) {
             usleep(100000);
+            waited_ms += 100;
         }
-        while (g2p5_->IsBusy()) {
-            usleep(100000);
+
+        if (!g2p5_->IsBusy()) {
+            LOG(WARNING) << "g2p5 LIO redraw did not start within " << kMaxWaitStartMs
+                        << "ms, skipping map_lio.pgm save";
+        } else {
+            waited_ms = 0;
+            while (g2p5_->IsBusy() && waited_ms < kMaxWaitBusyMs) {
+                usleep(100000);
+                waited_ms += 100;
+            }
+            if (waited_ms >= kMaxWaitBusyMs) {
+                LOG(ERROR) << "g2p5 LIO redraw timeout after " << kMaxWaitBusyMs << "ms";
+            }
         }
 
         if (auto lio_grid = g2p5_->GetNewestMap()) {
@@ -333,15 +384,24 @@ void SlamSystem::SaveMap(const std::string& path) {
     }
 
     if (options_.with_gridmap_) {
-        /// 使用优化后的位姿重建栅格地图
+        /// 使用优化后的位姿重建栅格地图。
+        /// 等待方式用「完成计数」而非 is_busy_ 忙标志：is_busy_ 是瞬时脉冲，短数据集
+        /// （如 825，96 个关键帧）渲染只需几十毫秒，100ms 轮询会整体错过 true->false
+        /// 的窗口，被误判成"重绘未启动"而丢掉 map.pgm。
+        const uint64_t render_before = g2p5_->GetRenderCount();
         g2p5_->RedrawGlobalMap();
-        /// 等待后端线程检测到 flag 并开始重建
-        while (!g2p5_->IsBusy()) {
-            usleep(100000);
+
+        constexpr int kMaxWaitRenderMs = 60000;
+        int waited_ms = 0;
+        while (g2p5_->GetRenderCount() == render_before && waited_ms < kMaxWaitRenderMs) {
+            usleep(10000);
+            waited_ms += 10;
         }
-        /// 等待重建完成
-        while (g2p5_->IsBusy()) {
-            usleep(100000);
+
+        if (g2p5_->GetRenderCount() == render_before) {
+            LOG(ERROR) << "g2p5 redraw did not complete within " << kMaxWaitRenderMs
+                      << "ms, cannot save grid map";
+            return;
         }
 
         /// 存为ROS兼容的模式
@@ -373,7 +433,16 @@ void SlamSystem::SaveMap(const std::string& path) {
 
             yamlFile << emitter.c_str();
             yamlFile.close();
+        } catch (const YAML::Exception& e) {
+            LOG(ERROR) << "YAML error while writing map.yaml: " << e.what();
+            yamlFile.close();
+            return;
+        } catch (const std::exception& e) {
+            LOG(ERROR) << "exception while writing map.yaml: " << e.what();
+            yamlFile.close();
+            return;
         } catch (...) {
+            LOG(ERROR) << "unknown exception while writing map.yaml";
             yamlFile.close();
             return;
         }
@@ -428,37 +497,53 @@ void SlamSystem::ProcessLidar(const sensor_msgs::msg::PointCloud2::SharedPtr& cl
         return;
     }
 
-    lio_->ProcessPointCloud2(cloud);
+    // 对齐 rk100 的积压保护：缓冲过深说明处理落后于数据源，丢弃"新输入"以追上实时，
+    // 但必须继续驱动 Run() 把已有缓冲排空——若在此直接 return，缓冲永远排不空，
+    // 地图在某一时刻之后再也不更新（一次瞬时积压即触发，真机上同样会发生）。
+    const bool too_deep = lio_->GetLidarBufferSize() > 2;
+    if (too_deep) {
+        static std::atomic<int> overflow_log_cnt{0};
+        if (overflow_log_cnt.fetch_add(1) % 100 == 0) {
+            LOG(WARNING) << "lidar buffer overflow, drop new scan (keep draining)";
+        }
+    } else {
+        lio_->ProcessPointCloud2(cloud);
+    }
+
     if (!lio_->Run()) {
         return;
     }
-
     auto state = lio_->GetState();
     if (state.pose_is_ok_) {
         PublishTF(state.GetPose());
     }
 
-    auto kf = lio_->GetKeyframe();
-    if (kf != cur_kf_) {
-        cur_kf_ = kf;
-    } else {
-        return;
+    Keyframe::Ptr kf;
+    {
+        std::unique_lock<std::mutex> lock(cur_kf_mutex_);
+        auto new_kf = lio_->GetKeyframe();
+        if (new_kf != cur_kf_) {
+            cur_kf_ = new_kf;
+            kf = cur_kf_;
+        } else {
+            return;
+        }
     }
 
-    if (cur_kf_ == nullptr) {
+    if (kf == nullptr) {
         return;
     }
 
     if (options_.with_loop_closing_) {
-        lc_->AddKF(cur_kf_);
+        lc_->AddKF(kf);
     }
 
     if (options_.with_gridmap_) {
-        g2p5_->PushKeyframe(cur_kf_);
+        g2p5_->PushKeyframe(kf);
     }
 
     if (ui_) {
-        ui_->UpdateKF(cur_kf_);
+        ui_->UpdateKF(kf);
     }
 
     UpdateVisualizationCaches();
@@ -469,7 +554,17 @@ void SlamSystem::ProcessLidar(const livox_ros_driver2::msg::CustomMsg::SharedPtr
         return;
     }
 
-    lio_->ProcessPointCloud2(cloud);
+    // 同 PointCloud2 重载：积压时丢弃新输入但继续排空缓冲
+    const bool too_deep = lio_->GetLidarBufferSize() > 2;
+    if (too_deep) {
+        static std::atomic<int> overflow_log_cnt2{0};
+        if (overflow_log_cnt2.fetch_add(1) % 100 == 0) {
+            LOG(WARNING) << "lidar buffer overflow (custom), drop new scan (keep draining)";
+        }
+    } else {
+        lio_->ProcessPointCloud2(cloud);
+    }
+
     if (!lio_->Run()) {
         return;
     }
@@ -479,27 +574,32 @@ void SlamSystem::ProcessLidar(const livox_ros_driver2::msg::CustomMsg::SharedPtr
         PublishTF(state.GetPose());
     }
 
-    auto kf = lio_->GetKeyframe();
-    if (kf != cur_kf_) {
-        cur_kf_ = kf;
-    } else {
-        return;
+    Keyframe::Ptr kf;
+    {
+        std::unique_lock<std::mutex> lock(cur_kf_mutex_);
+        auto new_kf = lio_->GetKeyframe();
+        if (new_kf != cur_kf_) {
+            cur_kf_ = new_kf;
+            kf = cur_kf_;
+        } else {
+            return;
+        }
     }
 
-    if (cur_kf_ == nullptr) {
+    if (kf == nullptr) {
         return;
     }
 
     if (options_.with_loop_closing_) {
-        lc_->AddKF(cur_kf_);
+        lc_->AddKF(kf);
     }
 
     if (options_.with_gridmap_) {
-        g2p5_->PushKeyframe(cur_kf_);
+        g2p5_->PushKeyframe(kf);
     }
 
     if (ui_) {
-        ui_->UpdateKF(cur_kf_);
+        ui_->UpdateKF(kf);
     }
 
     UpdateVisualizationCaches();
@@ -524,10 +624,20 @@ void SlamSystem::PublishTF(const SE3& pose) {
 }
 
 void SlamSystem::UpdateVisualizationCaches() {
-    latest_kf_id_for_viz_.store(cur_kf_->GetID());
+    Keyframe::Ptr kf;
+    {
+        std::unique_lock<std::mutex> lock(cur_kf_mutex_);
+        kf = cur_kf_;
+    }
+
+    if (!kf) {
+        return;
+    }
+
+    latest_kf_id_for_viz_.store(kf->GetID());
     has_kf_for_viz_.store(true);
 
-    const SE3 pose = options_.with_loop_closing_ ? cur_kf_->GetOptBodyPose() : cur_kf_->GetLIOBodyPose();
+    const SE3 pose = options_.with_loop_closing_ ? kf->GetOptBodyPose() : kf->GetLIOBodyPose();
 
     if (registered_scan_pub_ && registered_scan_pub_->get_subscription_count() > 0) {
         auto scan = lio_->GetScanUndist();
@@ -543,27 +653,13 @@ void SlamSystem::UpdateVisualizationCaches() {
     }
 
     if (global_map_pub_) {
-        CloudPtr cloud = cur_kf_->GetCloud();
-        if (cloud && cloud->size() > 0) {
-            pcl::VoxelGrid<PointType> voxel;
-            voxel.setLeafSize(1.0f, 1.0f, 1.0f);
-
-            CloudPtr cloud_filter(new PointCloudType);
-            voxel.setInputCloud(cloud);
-            voxel.filter(*cloud_filter);
-
-            CloudPtr cloud_trans(new PointCloudType);
-            pcl::transformPointCloud(*cloud_filter, *cloud_trans, pose.matrix());
-            cloud_trans->is_dense = false;
-            cloud_trans->height = 1;
-            cloud_trans->width = cloud_trans->size();
-
-            UL lock(viz_publish_mutex_);
-            *global_map_cache_ += *cloud_trans;
-            global_map_cache_->is_dense = false;
-            global_map_cache_->height = 1;
-            global_map_cache_->width = global_map_cache_->size();
-            global_map_cache_seq_++;
+        // 只入队，不做 PCL 运算：体素滤波+变换+累加在可视化线程里执行。
+        // 原实现在此同步执行，阻塞点云回调并连带阻塞 IMU 回调（实测 wall_dt 达 130ms），
+        // 造成 IMU 丢包与姿态精度下降。与 rk100 的后台实时地图线程方案对齐。
+        UL lock(viz_publish_mutex_);
+        pending_viz_kfs_.push_back(kf);
+        while (pending_viz_kfs_.size() > 200) {
+            pending_viz_kfs_.pop_front();  // 防止可视化落后时无限堆积
         }
     }
 }
@@ -576,6 +672,46 @@ void SlamSystem::PublishVisualizationLoop() {
     CloudPtr accumulated_global_map{new PointCloudType()};
 
     while (rclcpp::ok() && !debug::flg_exit && !stop_viz_publish_thread_) {
+        // 先消化待处理关键帧：体素滤波 + 变换 + 累加到 global_map_cache_。
+        // 这些 PCL 运算从点云回调移到这里，避免阻塞 IMU 回调。
+        if (global_map_pub_) {
+            std::deque<Keyframe::Ptr> batch_kfs;
+            {
+                UL lock(viz_publish_mutex_);
+                batch_kfs.swap(pending_viz_kfs_);
+            }
+
+            for (auto& vkf : batch_kfs) {
+                if (!vkf) {
+                    continue;
+                }
+                CloudPtr cloud = vkf->GetCloud();
+                if (!cloud || cloud->empty()) {
+                    continue;
+                }
+
+                pcl::VoxelGrid<PointType> voxel;
+                voxel.setLeafSize(1.0f, 1.0f, 1.0f);
+                CloudPtr cloud_filter(new PointCloudType);
+                voxel.setInputCloud(cloud);
+                voxel.filter(*cloud_filter);
+
+                const SE3 vpose = options_.with_loop_closing_ ? vkf->GetOptBodyPose() : vkf->GetLIOBodyPose();
+                CloudPtr cloud_trans(new PointCloudType);
+                pcl::transformPointCloud(*cloud_filter, *cloud_trans, vpose.matrix());
+                cloud_trans->is_dense = false;
+                cloud_trans->height = 1;
+                cloud_trans->width = cloud_trans->size();
+
+                UL lock(viz_publish_mutex_);
+                *global_map_cache_ += *cloud_trans;
+                global_map_cache_->is_dense = false;
+                global_map_cache_->height = 1;
+                global_map_cache_->width = global_map_cache_->size();
+                global_map_cache_seq_++;
+            }
+        }
+
         if (registered_scan_pub_ && registered_scan_pub_->get_subscription_count() > 0) {
             CloudPtr scan_copy = nullptr;
             SE3 scan_pose;

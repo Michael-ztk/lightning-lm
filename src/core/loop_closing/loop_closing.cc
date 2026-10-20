@@ -219,6 +219,11 @@ void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
     }
 
     Mat4f Tw2 = kf2->GetOptLidarPose().matrix().cast<float>();
+    if (!Tw2.allFinite()) {
+        LOG(ERROR) << "invalid initial pose for candidate " << c.idx1_ << "-" << c.idx2_;
+        c.ndt_score_ = 0;
+        return;
+    }
 
     // 保存匹配前的源点云和目标点云（都变换到世界坐标系下，方便对比差距）
     // CloudPtr src_in_world(new PointCloudType);
@@ -244,13 +249,46 @@ void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
         double voxel_size = std::max(0.1, r * 0.15);
         rough_map1 = VoxelGrid(submap_kf1, voxel_size);
         rough_map2 = VoxelGrid(submap_kf2, voxel_size);
+
+        // 点数下限：体素滤波后点太少时 NDT 的协方差估计不可靠，会给出虚高的概率或直接崩溃
+        if (!rough_map1 || !rough_map2 || rough_map1->size() < 50 || rough_map2->size() < 50) {
+            c.ndt_score_ = 0;
+            return;
+        }
+
+        // NaN/Inf 清理：点云含非有限值时 NDT 内部协方差会污染，导致匹配概率被拉低甚至不收敛。
+        // 这是与 rk100 回环实现的关键差异之一（原实现缺少此步）。
+        {
+            std::vector<int> indices;
+            pcl::removeNaNFromPointCloud(*rough_map1, *rough_map1, indices);
+            pcl::removeNaNFromPointCloud(*rough_map2, *rough_map2, indices);
+            rough_map1->is_dense = false;
+            rough_map2->is_dense = false;
+        }
+        if (rough_map1->size() < 50 || rough_map2->size() < 50) {
+            c.ndt_score_ = 0;
+            return;
+        }
+
         ndt.setInputTarget(rough_map1);
         ndt.setInputSource(rough_map2);
 
-        ndt.align(*output, Tw2);
-        Tw2 = ndt.getFinalTransformation();
+        // NDT 迭代可能因数值问题抛异常，捕获后按匹配失败处理，避免整条回环流程中断
+        try {
+            ndt.align(*output, Tw2);
+            Tw2 = ndt.getFinalTransformation();
+            c.ndt_score_ = ndt.getTransformationProbability();
+        } catch (...) {
+            c.ndt_score_ = 0;
+            return;
+        }
 
-        c.ndt_score_ = ndt.getTransformationProbability();
+        if (!Tw2.allFinite()) {
+            LOG(ERROR) << "NDT produced invalid transform for candidate " << c.idx1_ << "-" << c.idx2_
+                       << " at resolution " << r;
+            c.ndt_score_ = 0;
+            return;
+        }
     }
 
     Mat4d T = Tw2.cast<double>();
@@ -267,10 +305,17 @@ void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
     //           << t.transpose() << ", Tij_t=" << c.Tij_.translation().transpose() << ", saved=" << prefix;
 
     if (c.ndt_score_ > options_.ndt_score_th_ && options_.save_loop_clouds_) {
-        pcl::io::savePCDFileBinaryCompressed(
-            "./data/lc_" + std::to_string(c.idx1_) + "_" + std::to_string(c.idx2_) + "_out.pcd", *output);
-        pcl::io::savePCDFileBinaryCompressed(
-            "./data/lc_" + std::to_string(c.idx1_) + "_" + std::to_string(c.idx2_) + "_tgt.pcd", *rough_map1);
+        // 调试落盘失败（目录不存在/无写权限/磁盘满）不应中断回环流程：
+        // PCL 的 savePCDFile* 在打不开文件时抛 pcl::IOException，未捕获会直接 terminate
+        // 整个进程（实测 cwd 不在工程目录时必现）。
+        try {
+            pcl::io::savePCDFileBinaryCompressed(
+                "./data/lc_" + std::to_string(c.idx1_) + "_" + std::to_string(c.idx2_) + "_out.pcd", *output);
+            pcl::io::savePCDFileBinaryCompressed(
+                "./data/lc_" + std::to_string(c.idx1_) + "_" + std::to_string(c.idx2_) + "_tgt.pcd", *rough_map1);
+        } catch (const std::exception& e) {
+            LOG(WARNING) << "save loop clouds failed (debug only, ignored): " << e.what();
+        }
     }
 }
 

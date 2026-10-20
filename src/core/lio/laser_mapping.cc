@@ -219,13 +219,16 @@ void LaserMapping::ProcessIMU(const lightning::IMUPtr &imu) {
 
     if (p_imu_->IsIMUInited()) {
         /// 更新最新imu状态
-        kf_imu_.Predict(timestamp - last_timestamp_imu_, p_imu_->Q_, imu->angular_velocity, imu->linear_acceleration);
+        {
+            std::lock_guard<std::mutex> lock(mtx_kf_imu_);
+            kf_imu_.Predict(timestamp - last_timestamp_imu_, p_imu_->Q_, imu->angular_velocity, imu->linear_acceleration);
+        }
 
         // LOG(INFO) << "newest wrt lidar: " << timestamp - kf_.GetX().timestamp_;
 
         /// 更新ui
         if (ui_) {
-            ui_->UpdateNavState(kf_imu_.GetX());
+            ui_->UpdateNavState(GetIMUState());
         }
     }
 
@@ -438,14 +441,18 @@ bool LaserMapping::Run() {
         }
     }
 
+
     /// 更新kf_for_imu
-    kf_imu_ = kf_;
-    if (!measures_.imu_.empty()) {
-        double t = measures_.imu_.back()->timestamp;
-        for (auto &imu : imu_buffer_) {
-            double dt = imu->timestamp - t;
-            kf_imu_.Predict(dt, p_imu_->Q_, imu->angular_velocity, imu->linear_acceleration);
-            t = imu->timestamp;
+    {
+        std::lock_guard<std::mutex> lock(mtx_kf_imu_);
+        kf_imu_ = kf_;
+        if (!measures_.imu_.empty()) {
+            double t = measures_.imu_.back()->timestamp;
+            for (auto &imu : imu_buffer_) {
+                double dt = imu->timestamp - t;
+                kf_imu_.Predict(dt, p_imu_->Q_, imu->angular_velocity, imu->linear_acceleration);
+                t = imu->timestamp;
+            }
         }
     }
 
@@ -490,29 +497,32 @@ void LaserMapping::MakeKF() {
 }
 
 void LaserMapping::ProcessPointCloud2(const sensor_msgs::msg::PointCloud2::SharedPtr &msg) {
+    // 预处理必须在 mtx_buffer_ 之外执行：Hesai 单帧 3~6 万点，preprocess_->Process()
+    // 耗时几十到上百毫秒，若放在锁内会阻塞 200Hz 的 IMU 回调（实测 wall_dt 达 130ms），
+    // 造成 IMU 丢包（header_dt 跳到 0.1s）、去畸变时间戳异常与姿态精度下降。
+    // rk100 的预处理放在 rosbridge 的 ROS 回调线程里，锁内只做入队，与本改动等价。
+    CloudPtr cloud(new PointCloudType());
+    preprocess_->Process(msg, cloud);
+
+    // 优先使用雷达预处理设置的传感器时间戳（如Hesai），否则回退到ROS header时间戳
+    const double timestamp =
+        cloud->header.stamp != 0 ? double(cloud->header.stamp) * 1e-9 : ToSec(msg->header.stamp);
+
     UL lock(mtx_buffer_);
-    Timer::Evaluate(
-        [&, this]() {
-            scan_count_++;
+    scan_count_++;
 
-            CloudPtr cloud(new PointCloudType());
-            preprocess_->Process(msg, cloud);
+    if (timestamp < last_timestamp_lidar_) {
+        // 对齐 rk100：时间戳回退说明数据源重置（重播/断流重连），
+        // 仅丢弃当前帧会让缓冲里残留旧时间戳的点云，与后续帧混在一起
+        // 造成 sync 混乱；rk100 直接清空整个缓冲重新开始。
+        LOG(WARNING) << "lidar loop back, clear buffer. dt=" << timestamp - last_timestamp_lidar_;
+        lidar_buffer_.clear();
+        time_buffer_.clear();
+    }
 
-            // 优先使用雷达预处理设置的传感器时间戳（如Hesai），否则回退到ROS header时间戳
-            double timestamp = cloud->header.stamp != 0
-                                   ? double(cloud->header.stamp) * 1e-9
-                                   : ToSec(msg->header.stamp);
-
-            if (timestamp < last_timestamp_lidar_) {
-                LOG(ERROR) << "lidar loop back, dt: " << timestamp - last_timestamp_lidar_;
-                return;
-            }
-
-            lidar_buffer_.push_back(cloud);
-            time_buffer_.push_back(timestamp);
-            last_timestamp_lidar_ = timestamp;
-        },
-        "Preprocess (Standard)");
+    lidar_buffer_.push_back(cloud);
+    time_buffer_.push_back(timestamp);
+    last_timestamp_lidar_ = timestamp;
 }
 
 void LaserMapping::ProcessPointCloud2(const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg) {
@@ -522,8 +532,12 @@ void LaserMapping::ProcessPointCloud2(const livox_ros_driver2::msg::CustomMsg::S
             scan_count_++;
             double timestamp = ToSec(msg->header.stamp);
             if (timestamp < last_timestamp_lidar_) {
-                LOG(ERROR) << "lidar loop back, dt: " << timestamp - last_timestamp_lidar_;
-                return;
+                // 对齐 rk100：时间戳回退说明数据源重置（重播/断流重连），
+                // 仅丢弃当前帧会让缓冲里残留旧时间戳的点云，与后续帧混在一起
+                // 造成 sync 混乱；rk100 直接清空整个缓冲重新开始。
+                LOG(WARNING) << "lidar loop back, clear buffer. dt=" << timestamp - last_timestamp_lidar_;
+                lidar_buffer_.clear();
+                time_buffer_.clear();
             }
 
             // LOG(INFO) << "get cloud at " << std::setprecision(14) << timestamp
@@ -547,8 +561,12 @@ void LaserMapping::ProcessPointCloud2(CloudPtr cloud) {
 
             double timestamp = math::ToSec(cloud->header.stamp);
             if (timestamp < last_timestamp_lidar_) {
-                LOG(ERROR) << "lidar loop back, dt: " << timestamp - last_timestamp_lidar_;
-                return;
+                // 对齐 rk100：时间戳回退说明数据源重置（重播/断流重连），
+                // 仅丢弃当前帧会让缓冲里残留旧时间戳的点云，与后续帧混在一起
+                // 造成 sync 混乱；rk100 直接清空整个缓冲重新开始。
+                LOG(WARNING) << "lidar loop back, clear buffer. dt=" << timestamp - last_timestamp_lidar_;
+                lidar_buffer_.clear();
+                time_buffer_.clear();
             }
 
             lidar_buffer_.push_back(cloud);
@@ -581,11 +599,10 @@ bool LaserMapping::SyncPackages() {
             lidar_mean_scantime_ +=
                 (measures_.scan_->points.back().time / double(1000) - lidar_mean_scantime_) / scan_num_;
 
-            if ((lidar_end_time_ - measures_.lidar_begin_time_) > 5 * lo::lidar_time_interval) {
-                /// timestamp 有异常
-                lidar_end_time_ = measures_.lidar_begin_time_ + lo::lidar_time_interval;
-                lidar_mean_scantime_ = lo::lidar_time_interval;
-            }
+            // 注意：此处不做事先的时间戳截断。rk100 没有该逻辑，而截断会把异常帧的
+            // lidar_end_time_ 强行压到 lidar_begin_time_+lidar_time_interval，使该帧
+            // 与相邻帧的时间间隔出现 0.05~0.1s 的异常值，进而生成 dt 异常的关键帧
+            // （实测在 use_aa=true 时表现为轨迹跳变）。异常帧应由下方 IMU 覆盖检查兜底。
         }
 
         lo::lidar_time_interval = lidar_mean_scantime_ * 1.1;
@@ -832,13 +849,18 @@ void LaserMapping::ObsModel(NavState &s, ESKF::CustomObservationModel &obs) {
                 const float delta = 2.0;
                 const float dsqr = delta * delta;
                 const float dsqr_inv = 1.0 / dsqr;
+                const float eps = 1e-6f;  // 数值保护
 
+                // arg 下限保护：res<0 且 |res| > delta^2 时 1-res/delta^2 会变为 0 或负数，
+                // log 溢出为 -inf / NaN 并污染整条残差向量（drho 同理）。
                 if (res >= 0) {
-                    rho = dsqr * std::log(1 + res * dsqr_inv);
-                    drho = 1.0 / (1 + res * dsqr_inv);
+                    const float arg = std::max(eps, 1.0f + res * dsqr_inv);
+                    rho = dsqr * std::log(arg);
+                    drho = 1.0f / arg;
                 } else {
-                    rho = -dsqr * std::log(1 - res * dsqr_inv);
-                    drho = 1.0 / (1 - res * dsqr_inv);
+                    const float arg = std::max(eps, 1.0f - res * dsqr_inv);
+                    rho = -dsqr * std::log(arg);
+                    drho = 1.0f / arg;
                 }
 
                 obs.residual_(i) = rho;
@@ -1291,7 +1313,7 @@ void LaserMapping::RemoveDynamicByKeyframeRays() {
             if (last_end == (uint64_t)kf_idx) {
                 return;  // 本关键帧已计入
             }
-            uint64_t next = (cur & 0xFFFFFFFF0000FFFF) | (((end_cnt + 1) & 0xFFFF) << 32) | (uint64_t)kf_idx;
+            uint64_t next = (cur & 0xFFFF0000FFFF0000ULL) | (((end_cnt + 1) & 0xFFFF) << 32) | (uint64_t)kf_idx;
             if (cells[cell_idx].compare_exchange_weak(cur, next, std::memory_order_relaxed)) {
                 return;
             }
@@ -1307,8 +1329,7 @@ void LaserMapping::RemoveDynamicByKeyframeRays() {
             if (last_pass == (uint64_t)kf_idx) {
                 return;
             }
-            uint64_t next = (cur & 0x0000FFFFFFFF0000) | (((pass_cnt + 1) & 0xFFFF) << 48) | ((uint64_t)kf_idx << 16) |
-                            (cur & 0xFFFF);
+            uint64_t next = (cur & 0x0000FFFF0000FFFFULL) | (((pass_cnt + 1) & 0xFFFF) << 48) | ((uint64_t)kf_idx << 16);
             if (cells[cell_idx].compare_exchange_weak(cur, next, std::memory_order_relaxed)) {
                 return;
             }
@@ -1512,8 +1533,11 @@ void LaserMapping::RemoveDynamicByKeyframeRays() {
     // 止步于残影边界
     std::vector<uint8_t> remove_mask(n_cells, 0);
     size_t grown_cells = 0;
-    if (rayclean_grow_en_) {
-        // 种子：判据通过 且 聚类支持达标（与第3遍逐点判定一致，按体素预计算）
+    size_t seed_cells = 0;
+    // 种子（确认核心）：判据通过 且 聚类支持达标（与第3遍逐点判定一致，按体素预计算）。
+    // 本段始终执行、独立于 rayclean_grow_en_：remove_mask 只由本段填充，而下方逐点删除
+    // 循环仅读取 remove_mask，若把种子选取纳入生长开关，关闭生长会让射线清洗整体失效。
+    {
         std::vector<int64_t> frontier;
         for (int64_t i = 0; i < n_cells; ++i) {
             if (protected_mask[i]) {
@@ -1535,6 +1559,18 @@ void LaserMapping::RemoveDynamicByKeyframeRays() {
                     }
             if (support >= rayclean_min_cluster_points_) {
                 remove_mask[i] = 1;  // 1=确认种子
+                frontier.push_back(i);
+                seed_cells++;
+            }
+        }
+        LOG(INFO) << "ray clean seeds: confirmed_cells=" << seed_cells;
+    }
+
+    if (rayclean_grow_en_) {
+        // 从已确认种子出发 BFS
+        std::vector<int64_t> frontier;
+        for (int64_t i = 0; i < n_cells; ++i) {
+            if (remove_mask[i] == 1) {
                 frontier.push_back(i);
             }
         }
@@ -1564,6 +1600,25 @@ void LaserMapping::RemoveDynamicByKeyframeRays() {
                     if (pass_cnt < (uint64_t)rayclean_pass_th_ || end_cnt < 1 ||
                         (!(late_ok || end_cnt <= (uint64_t)rayclean_grow_end_th_))) {
                         continue;  // 无穿越证据，或观测次数过高且无迟到穿越（静态表面），不吸收
+                    }
+                    // 紧凑候选簇校验（与种子同源）：生长只能吸收"本身处于残影候选密集区"的体素。
+                    // 缺此校验时生长会覆盖第3遍的"稀疏候选放回"保护——凡是紧挨种子的稀疏体素
+                    // （实测多为掠射地面/墙面边缘，end_cnt 低但并非动态）都会被一并删除，
+                    // 表现为地面被打洞。要求候选簇支持后，孤立稀疏体素仍按原设计放回。
+                    {
+                        int support = 0;
+                        for (int64_t dx = -1; dx <= 1 && support < rayclean_min_cluster_points_; ++dx)
+                            for (int64_t dy = -1; dy <= 1 && support < rayclean_min_cluster_points_; ++dy)
+                                for (int64_t dz = -1; dz <= 1 && support < rayclean_min_cluster_points_; ++dz) {
+                                    const int64_t kx = jx + dx, ky = jy + dy, kz = jz + dz;
+                                    if (kx < 0 || kx >= nx || ky < 0 || ky >= ny || kz < 0 || kz >= nz) {
+                                        continue;
+                                    }
+                                    support += cand_cnt[(kx * ny + ky) * nz + kz].load(std::memory_order_relaxed);
+                                }
+                        if (support < rayclean_min_cluster_points_) {
+                            continue;  // 稀疏候选：按第3遍的设计放回，不由生长吸收
+                        }
                     }
                     remove_mask[j] = 2;  // 2=邻域生长吸收
                     grown_cells++;
