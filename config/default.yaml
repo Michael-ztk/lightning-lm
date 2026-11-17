@@ -71,6 +71,18 @@ loop_closing:
   source_submap_idx_range: 0
   source_submap_stride: 1
   with_height: true
+  save_loop_clouds: false   # 保存回环点云用于调试
+
+  # 子图几何一致性检查（配准前）
+  max_submap_aspect: 5.0    # 子图 XY 长宽比上限，超过判为狭长通道（0=禁用）
+  max_centroid_dist: 2.0    # 子图质心距上限(m)，超过则检查覆盖度（0=禁用）
+  min_coverage_rate: 75.0   # 质心超限时的最小覆盖度(%)，取 max(正向,反向)
+  coverage_cell_size: 0.2   # 计算覆盖度时的 XY 栅格边长(m)
+
+  # 空间去重：同一区域在 半径+时间+帧数 三个窗口内只触发一次
+  suppress_radius: 3.0   # 空间半径(m)，0=禁用
+  suppress_time: 300.0   # 时间窗口(s)
+  suppress_kf: 600       # 帧数窗口
 
 
 ### localization ================================================================================================

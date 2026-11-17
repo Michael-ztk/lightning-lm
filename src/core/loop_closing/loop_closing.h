@@ -45,6 +45,23 @@ class LoopClosing {
         bool with_height_ = true;
         double height_noise_ = 0.1;
         bool save_loop_clouds_ = false;  // 保存回环点云用于调试
+        bool remove_ground_in_lc_ = false;  // 子图构建时是否移除地面
+
+        // 子图几何一致性检查（配准前）
+        double max_submap_aspect_ = 5.0;      // 子图 XY 长宽比上限（0=禁用）
+        double max_centroid_dist_ = 2.0;      // 子图质心距上限(m)（0=禁用）
+        double min_coverage_rate_ = 75.0;     // 质心超限时的最小覆盖度(%)，取 max(正向,反向)
+        double coverage_cell_size_ = 0.2;     // 计算覆盖度时的 XY 栅格边长(m)
+
+        // GICP 主配准参数（与 rk100 一致）
+        double gicp_reg_voxel_ = 0.15;      // 降采样体素(m)
+        int gicp_reg_max_iter_ = 60;        // 最大迭代次数
+        double gicp_reg_corr_dist_ = 1.0;   // 最大对应点距离(m)
+
+        // 空间去重：同一区域在 半径+时间+帧数 三个窗口内只触发一次
+        double suppress_radius_ = 3.0;   // 空间半径(m)，0=禁用
+        double suppress_time_ = 300.0;   // 时间窗口(s)
+        int suppress_kf_ = 600;          // 帧数窗口
     };
 
     LoopClosing(Options options = Options()) { options_ = options; }
@@ -80,6 +97,14 @@ class LoopClosing {
     Keyframe::Ptr cur_kf_ = nullptr;
     std::vector<Keyframe::Ptr> all_keyframes_;
     std::vector<LoopCandidate> candidates_;
+
+    /// 已触发过回环的区域（用于空间去重）
+    struct LoopRegion {
+        Vec3d center;
+        double stamp = 0.0;
+        int kf_id = 0;
+    };
+    std::vector<LoopRegion> recent_loop_regions_;
 
     AsyncMessageProcess<Keyframe::Ptr> kf_thread_;
 
