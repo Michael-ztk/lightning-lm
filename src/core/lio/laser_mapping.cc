@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <sstream>
 #include <random>
 #include <unordered_map>
 #include <fstream>
@@ -85,18 +86,14 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         /// 射线free-space清洗参数（缺省时使用默认值）
         auto flio = yaml["fasterlio"];
         rayclean_en_ = flio["rayclean_en"] ? flio["rayclean_en"].as<bool>() : rayclean_en_;
-        rayclean_voxel_size_ = flio["rayclean_voxel_size"] ? flio["rayclean_voxel_size"].as<double>() : rayclean_voxel_size_;
+
+        rayclean_sensor_height_ =
+            flio["rayclean_sensor_height"] ? flio["rayclean_sensor_height"].as<double>() : rayclean_sensor_height_;
+        rayclean_high_z_ = flio["rayclean_high_z"] ? flio["rayclean_high_z"].as<double>() : rayclean_high_z_;
+        rayclean_pass_th_high_ = flio["rayclean_pass_th_high"] ? flio["rayclean_pass_th_high"].as<int>() : rayclean_pass_th_high_;
+        rayclean_end_th_high_ = flio["rayclean_end_th_high"] ? flio["rayclean_end_th_high"].as<int>() : rayclean_end_th_high_;        rayclean_voxel_size_ = flio["rayclean_voxel_size"] ? flio["rayclean_voxel_size"].as<double>() : rayclean_voxel_size_;
         rayclean_pass_th_ = flio["rayclean_pass_th"] ? flio["rayclean_pass_th"].as<int>() : rayclean_pass_th_;
         rayclean_end_th_ = flio["rayclean_end_th"] ? flio["rayclean_end_th"].as<int>() : rayclean_end_th_;
-        rayclean_plane_protect_dist_ =
-            flio["rayclean_plane_protect_dist"] ? flio["rayclean_plane_protect_dist"].as<double>() : rayclean_plane_protect_dist_;
-        rayclean_plane_tile_size_ =
-            flio["rayclean_plane_tile_size"] ? flio["rayclean_plane_tile_size"].as<double>() : rayclean_plane_tile_size_;
-        rayclean_plane_ransac_dist_ =
-            flio["rayclean_plane_ransac_dist"] ? flio["rayclean_plane_ransac_dist"].as<double>() : rayclean_plane_ransac_dist_;
-        rayclean_plane_min_inlier_frac_ = flio["rayclean_plane_min_inlier_frac"]
-                                              ? flio["rayclean_plane_min_inlier_frac"].as<double>()
-                                              : rayclean_plane_min_inlier_frac_;
         rayclean_grow_en_ = flio["rayclean_grow_en"] ? flio["rayclean_grow_en"].as<bool>() : rayclean_grow_en_;
         rayclean_grow_end_th_ = flio["rayclean_grow_end_th"] ? flio["rayclean_grow_end_th"].as<int>() : rayclean_grow_end_th_;
         rayclean_grow_steps_ = flio["rayclean_grow_steps"] ? flio["rayclean_grow_steps"].as<int>() : rayclean_grow_steps_;
@@ -1109,6 +1106,10 @@ void LaserMapping::RemoveDynamicByKeyframeRays() {
         return;
     }
 
+    // 地面高度由参数给出（传感器安装高度）。世界系原点是初始化时刻的传感器位置
+    // （IMU 初始化只做重力对齐并置零位置），故地面位于 Z = -rayclean_sensor_height。
+    const double z_ground = -rayclean_sensor_height_;
+
     /// ---- 栅格：内存超限时自动放粗体素（密集数组，无哈希开销）----
     double voxel_used = voxel;
     int64_t nx = 0, ny = 0, nz = 0;
@@ -1152,152 +1153,10 @@ void LaserMapping::RemoveDynamicByKeyframeRays() {
         return ix >= 0 && ix < nx && iy >= 0 && iy < ny && iz >= 0 && iz < nz;
     };
 
-    /// ---- 平面保护：分块RANSAC检测地面/墙面等结构性平面，邻近体素不参与清洗 ----
-    // 地面/墙面的体素会因掠射穿越+位姿漂移呈现"被穿越且鲜被观测"的动态特征，是误删的主要来源。
-    // 按瓦片分块拟合局部平面（瓦片内局部刚性，漂移弯曲的结构面也能覆盖），保护后不再误删
-    std::vector<Eigen::Vector4d> protect_planes;  // (nx,ny,nz,d): n*x+d=0
-    {
-        std::vector<Eigen::Vector3d> pts;
-        pts.reserve(total_pts / 8 + 16);
-        for (int i = 0; i < n_kf; ++i) {
-            const auto &cloud = kfs[i]->GetCloud();
-            if (!cloud) {
-                continue;
-            }
-            for (size_t pi = 0; pi < cloud->points.size(); pi += 8) {
-                Vec3d pw = kf_rot[i] * cloud->points[pi].getVector3fMap().cast<double>() + kf_pos[i];
-                if ((pw - kf_pos[i]).squaredNorm() > max_range_sq) {
-                    continue;
-                }
-                pts.emplace_back(pw);
-            }
-        }
-        const double tile = rayclean_plane_tile_size_;
-        std::unordered_map<uint64_t, std::vector<int>> tiles;
-        for (int i = 0; i < static_cast<int>(pts.size()); ++i) {
-            const int64_t tx = static_cast<int64_t>(std::floor(pts[i].x() / tile));
-            const int64_t ty = static_cast<int64_t>(std::floor(pts[i].y() / tile));
-            tiles[(static_cast<uint64_t>(tx) << 32) ^ static_cast<uint64_t>(ty & 0xFFFFFFFFll)].push_back(i);
-        }
-        const int kIters = 150;
-        for (const auto &kv : tiles) {
-            const std::vector<int> &idxs = kv.second;
-            if (idxs.size() < 500) {
-                continue;
-            }
-            for (int round = 0; round < 2; ++round) {  // 每瓦片最多2个平面（如地面+墙裙）
-                std::vector<int> avail;
-                avail.reserve(idxs.size());
-                for (int i : idxs) {
-                    bool used_flag = false;
-                    for (const auto &pl : protect_planes) {
-                        if (std::fabs(pl.head<3>().dot(pts[i]) + pl.w()) < rayclean_plane_ransac_dist_ * 1.5) {
-                            used_flag = true;
-                            break;
-                        }
-                    }
-                    if (!used_flag) {
-                        avail.push_back(i);
-                    }
-                }
-                if (avail.size() < std::max<size_t>(300, idxs.size() * rayclean_plane_min_inlier_frac_)) {
-                    break;
-                }
-                int best_inliers = 0;
-                Eigen::Vector4d best_plane(0, 0, 1, 0);
-                std::mt19937 rng(static_cast<unsigned>(kv.first) + 20260830u + round * 7919u);
-                std::uniform_int_distribution<int> uni(0, static_cast<int>(avail.size()) - 1);
-                for (int it = 0; it < kIters; ++it) {
-                    const Eigen::Vector3d &pa = pts[avail[uni(rng)]], &pb = pts[avail[uni(rng)]],
-                                          &pc = pts[avail[uni(rng)]];
-                    if ((pa - pb).norm() < 1.0 || (pa - pc).norm() < 1.0 || (pb - pc).norm() < 1.0) {
-                        continue;
-                    }
-                    Eigen::Vector4d pl;
-                    pl.head<3>() = (pb - pa).cross(pc - pa);
-                    const double nrm = pl.head<3>().norm();
-                    if (nrm < 1e-6) {
-                        continue;
-                    }
-                    pl.head<3>() /= nrm;
-                    pl.w() = -pl.head<3>().dot(pa);
-                    int cnt = 0;
-                    for (int i : avail) {
-                        if (std::fabs(pl.head<3>().dot(pts[i]) + pl.w()) < rayclean_plane_ransac_dist_) {
-                            cnt++;
-                        }
-                    }
-                    if (cnt > best_inliers) {
-                        best_inliers = cnt;
-                        best_plane = pl;
-                    }
-                }
-                if (best_inliers < static_cast<int>(std::max<size_t>(300, avail.size() * rayclean_plane_min_inlier_frac_))) {
-                    break;
-                }
-                // 内点PCA精修
-                Eigen::Vector3d mean = Eigen::Vector3d::Zero();
-                int m = 0;
-                for (int i : avail) {
-                    if (std::fabs(best_plane.head<3>().dot(pts[i]) + best_plane.w()) < rayclean_plane_ransac_dist_) {
-                        mean += pts[i];
-                        m++;
-                    }
-                }
-                if (m > 3) {
-                    mean /= m;
-                    Eigen::Matrix3d cov = Eigen::Matrix3d::Zero();
-                    for (int i : avail) {
-                        if (std::fabs(best_plane.head<3>().dot(pts[i]) + best_plane.w()) < rayclean_plane_ransac_dist_) {
-                            const Eigen::Vector3d ev = pts[i] - mean;
-                            cov += ev * ev.transpose();
-                        }
-                    }
-                    cov /= m;
-                    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(cov);
-                    best_plane.head<3>() = es.eigenvectors().col(0);
-                    best_plane.w() = -best_plane.head<3>().dot(mean);
-                }
-                protect_planes.push_back(best_plane);
-                LOG(INFO) << "ray clean plane[" << protect_planes.size() - 1 << "]: inliers=" << best_inliers << "/"
-                          << avail.size() << " n=[" << best_plane[0] << ", " << best_plane[1] << ", "
-                          << best_plane[2] << "] d=" << best_plane[3];
-            }
-        }
-        LOG(INFO) << "ray clean protect planes total: " << protect_planes.size();
-    }
-    // 体素保护掩码：距任一检测平面小于 protect_dist 的体素不参与清洗
-    std::vector<uint8_t> protected_mask(n_cells, 0);
-    for (int64_t i = 0; i < n_cells; ++i) {
-        const int64_t ix = i / (ny * nz), iy = (i / nz) % ny, iz = i % nz;
-        const Vec3d ctr(grid_min.x() + (ix + 0.5) * voxel_used, grid_min.y() + (iy + 0.5) * voxel_used,
-                        grid_min.z() + (iz + 0.5) * voxel_used);
-        for (const auto &pl : protect_planes) {
-            if (std::fabs(pl.head<3>().dot(ctr) + pl.w()) < rayclean_plane_protect_dist_) {
-                protected_mask[i] = 1;
-                break;
-            }
-        }
-    }
-    // near_protected: 自身或26邻域存在保护体素（贴近平面带）。迟到穿越判据只在远离
-    // 平面带的位置生效——漂移窗格（表面观测提前终止的静态体素）必然贴着平面带，
-    // 而多拨行人反复经过的悬空残影远离平面带，以此门控区分二者
-    std::vector<uint8_t> near_protected(n_cells, 0);
-    for (int64_t i = 0; i < n_cells; ++i) {
-        if (!protected_mask[i]) {
-            continue;
-        }
-        const int64_t ix = i / (ny * nz), iy = (i / nz) % ny, iz = i % nz;
-        for (int dx = -1; dx <= 1; ++dx)
-            for (int dy = -1; dy <= 1; ++dy)
-                for (int dz = -1; dz <= 1; ++dz) {
-                    const int64_t jx = ix + dx, jy = iy + dy, jz = iz + dz;
-                    if (jx < 0 || jx >= nx || jy < 0 || jy >= ny || jz < 0 || jz >= nz) {
-                        continue;
-                    }
-                    near_protected[(jx * ny + jy) * nz + jz] = 1;
-                }
-    }
+    /// ---- 平面保护已移除 ----
+    // 实测：分块 RANSAC 在室内场景会拟合出 20+ 个近似水平的伪平面（床板、隔断、扶手等），
+    // 每个带 ±0.3m 保护带相互堆叠后覆盖了 0~2m 全部高度，导致候选与种子几乎为零、
+    // 清洗完全失效。地面误删问题改由 rayclean_pass_end_ratio（穿过/看见比例约束）解决。
     // 迟到穿越计数：最后一次被观测为表面之后，仍有多少个不同关键帧的射线穿过该体素
     std::vector<std::atomic<uint16_t>> late_cnt(n_cells);
     for (int64_t i = 0; i < n_cells; ++i) {
@@ -1305,15 +1164,19 @@ void LaserMapping::RemoveDynamicByKeyframeRays() {
     }
 
     // 无锁更新体素端点计数（同一关键帧只记一次；不同线程处理不同关键帧，CAS安全）
+    // 去重标记存 kf_idx+1，0 作为"尚无记录"的哨兵值。
+    // 若直接存 kf_idx，则关键帧 0 首次到达时 cur=0 使 last_end=0 == kf_idx=0，
+    // 会被误判为"本帧已计入"而 return，导致关键帧 0 的全部观测从未被统计。
     auto add_end = [&](int64_t cell_idx, int kf_idx) {
+        const uint64_t tag = (uint64_t)kf_idx + 1;
         uint64_t cur = cells[cell_idx].load(std::memory_order_relaxed);
         while (true) {
             uint64_t end_cnt = (cur >> 32) & 0xFFFF;
             uint64_t last_end = cur & 0xFFFF;
-            if (last_end == (uint64_t)kf_idx) {
+            if (last_end == tag) {
                 return;  // 本关键帧已计入
             }
-            uint64_t next = (cur & 0xFFFF0000FFFF0000ULL) | (((end_cnt + 1) & 0xFFFF) << 32) | (uint64_t)kf_idx;
+            uint64_t next = (cur & 0xFFFF0000FFFF0000ULL) | (((end_cnt + 1) & 0xFFFF) << 32) | tag;
             if (cells[cell_idx].compare_exchange_weak(cur, next, std::memory_order_relaxed)) {
                 return;
             }
@@ -1322,14 +1185,15 @@ void LaserMapping::RemoveDynamicByKeyframeRays() {
 
     // 无锁更新体素穿越计数（同一关键帧只记一次）
     auto add_pass = [&](int64_t cell_idx, int kf_idx) {
+        const uint64_t tag = (uint64_t)kf_idx + 1;  // 同 add_end：0 为无记录哨兵
         uint64_t cur = cells[cell_idx].load(std::memory_order_relaxed);
         while (true) {
             uint64_t pass_cnt = (cur >> 48) & 0xFFFF;
             uint64_t last_pass = (cur >> 16) & 0xFFFF;
-            if (last_pass == (uint64_t)kf_idx) {
+            if (last_pass == tag) {
                 return;
             }
-            uint64_t next = (cur & 0x0000FFFF0000FFFFULL) | (((pass_cnt + 1) & 0xFFFF) << 48) | ((uint64_t)kf_idx << 16);
+            uint64_t next = (cur & 0x0000FFFF0000FFFFULL) | (((pass_cnt + 1) & 0xFFFF) << 48) | (tag << 16);
             if (cells[cell_idx].compare_exchange_weak(cur, next, std::memory_order_relaxed)) {
                 return;
             }
@@ -1450,8 +1314,10 @@ void LaserMapping::RemoveDynamicByKeyframeRays() {
                             // （last_end 从 pass-1 写入的 cell 字低位段读取）
                             if (last_seen_late[pidx] != i) {
                                 const uint64_t cur = cells[pidx].load(std::memory_order_relaxed);
-                                const uint32_t last_end = static_cast<uint32_t>(cur & 0xFFFF);
-                                if (last_end != 0 && i > static_cast<int>(last_end)) {
+                                // 低位段是 kf_idx+1 的去重标记（0=尚无记录），还原成帧号再比较
+                                const uint32_t last_end_tag = static_cast<uint32_t>(cur & 0xFFFF);
+                                const int last_end = last_end_tag == 0 ? -1 : static_cast<int>(last_end_tag) - 1;
+                                if (last_end >= 0 && i > last_end) {
                                     last_seen_late[pidx] = i;
                                     uint16_t lc = late_cnt[pidx].load(std::memory_order_relaxed);
                                     while (lc < 0xFFFF && !late_cnt[pidx].compare_exchange_weak(
@@ -1478,20 +1344,83 @@ void LaserMapping::RemoveDynamicByKeyframeRays() {
         ray_removed_dbg_cloud_->points.reserve(200000);
     }
 
+    /// ---- 诊断：pass_cnt / end_cnt 联合分布（按高度分层）----
+    if (rayclean_debug_save_) {
+        // 桶: pass 0-1,2,3,4-5,6-9,10+; end 0,1,2,3,4-5,6-9,10+
+        const int kP = 6, kE = 7;
+        std::vector<std::vector<long>> hist(kP, std::vector<long>(kE, 0));
+        auto pb = [](uint64_t v) -> int {
+            if (v <= 1) return 0;
+            if (v == 2) return 1;
+            if (v == 3) return 2;
+            if (v <= 5) return 3;
+            if (v <= 9) return 4;
+            return 5;
+        };
+        auto eb = [](uint64_t v) -> int {
+            if (v == 0) return 0;
+            if (v == 1) return 1;
+            if (v == 2) return 2;
+            if (v == 3) return 3;
+            if (v <= 5) return 4;
+            if (v <= 9) return 5;
+            return 6;
+        };
+        // 分层统计：低层 Z<0.8, 中层 0.8~1.2, 高层 >1.2（体素中心）
+        std::vector<std::vector<std::vector<long>>> byZ(3, std::vector<std::vector<long>>(kP, std::vector<long>(kE, 0)));
+        for (int64_t i = 0; i < n_cells; ++i) {
+            if (pt_cnt[i].load(std::memory_order_relaxed) == 0) continue;
+            const uint64_t c = cells[i].load(std::memory_order_relaxed);
+            const uint64_t pass_cnt = (c >> 48) & 0xFFFF;
+            const uint64_t end_cnt = (c >> 32) & 0xFFFF;
+            const int64_t iz = i % nz;
+            const double zc = grid_min.z() + (iz + 0.5) * voxel_used;
+            int zi = zc < 0.8 ? 0 : (zc < 1.2 ? 1 : 2);
+            byZ[zi][pb(pass_cnt)][eb(end_cnt)]++;
+        }
+        const char *pn = "0-1 2 3 4-5 6-9 10+";
+        const char *en = "0 1 2 3 4-5 6-9 10+";
+        for (int zi = 0; zi < 3; ++zi) {
+            const char *zn = zi == 0 ? "LOW(<0.8m)" : (zi == 1 ? "MID(0.8-1.2m)" : "HIGH(>1.2m)");
+            LOG(INFO) << "rayclean hist " << zn << " rows=pass[" << pn << "] cols=end[" << en << "]";
+            for (int p = 0; p < kP; ++p) {
+                std::ostringstream oss;
+                for (int e2 = 0; e2 < kE; ++e2) oss << byZ[zi][p][e2] << " ";
+                LOG(INFO) << "  pass[" << p << "]: " << oss.str();
+            }
+        }
+    }
+
     /// ---- 第3.5遍：射线判决候选的空间密度统计 ----
     // 只计数满足动态残影判据的"候选点"；真正删除前要求其体素+26邻域内候选总数达标。
     // 行人残影点集稠密、轻易达到阈值；墙面/天花板被掠射零星误判的孤立候选四周无同伙，放回
+    // 按高度分档的阈值：LiDAR 装在约 1m 高，向上射线路径短、扫过的体素少，
+    // 高处体素的 pass_cnt 天然偏低（实测 Z>1.2m 有 40% 的体素 pass_cnt<=1），
+    // 用同一套绝对阈值会让高处（行人躯干、推车）系统性漏删。
+    // 因此高处放宽 pass/end 阈值；比例判据 pass >= ratio*end 仍统一生效，防止误删失控。
     auto ray_condemn_check = [&](int64_t idx) -> bool {
         const uint64_t c = cells[idx].load(std::memory_order_relaxed);
         const uint64_t pass_cnt = (c >> 48) & 0xFFFF;
         const uint64_t end_cnt = (c >> 32) & 0xFFFF;
-        // 原判据：被穿越 且 观测次数少（快速通过的行人）
-        if (pass_cnt >= (uint64_t)rayclean_pass_th_ && end_cnt >= 1 && end_cnt <= (uint64_t)rayclean_end_th_) {
+        const int64_t iz_ = idx % nz;
+        const double zc_ = grid_min.z() + (iz_ + 0.5) * voxel_used;
+        // 用离地高度分档，而非世界系绝对 Z：世界系原点是传感器位置，
+        // 绝对 Z 的语义随安装高度变化，离地高度才能跨数据集通用
+        const bool high = (zc_ - z_ground) >= rayclean_high_z_;
+        const uint64_t pass_th = high ? (uint64_t)rayclean_pass_th_high_ : (uint64_t)rayclean_pass_th_;
+        const uint64_t end_th = high ? (uint64_t)rayclean_end_th_high_ : (uint64_t)rayclean_end_th_;
+        // 主判据：被穿越 且 观测次数少（快速通过的行人）
+        // 附加比例约束 pass >= ratio * end：静态表面即使被看到的帧数少，
+        // 其"看到"与"穿过"的次数也接近（同一帧既可能看到也可能掠过）；
+        // 而动态残影的穿越帧数远多于看到帧数。绝对阈值无法区分这两种情况，
+        // 比例约束可把"只在少数视角可见的静态表面"（稀疏地面、窄墙）排除在外。
+        if (pass_cnt >= pass_th && end_cnt >= 1 && end_cnt <= end_th &&
+            (double)pass_cnt >= rayclean_pass_end_ratio_ * (double)end_cnt) {
             return true;
         }
         // 迟到穿越判据：最后一次被观测为表面之后仍被>=late_pass_th个不同关键帧穿越，
         // 且远离平面保护带（多拨行人反复经过/久站后离开的悬空残影；贴平面带的漂移窗格被门控排除）
-        if (!near_protected[idx] && late_cnt[idx].load(std::memory_order_relaxed) >= (uint16_t)rayclean_late_pass_th_) {
+        if (late_cnt[idx].load(std::memory_order_relaxed) >= (uint16_t)rayclean_late_pass_th_) {
             return true;
         }
         return false;
@@ -1515,9 +1444,9 @@ void LaserMapping::RemoveDynamicByKeyframeRays() {
                 continue;
             }
             int64_t idx = (ix * ny + iy) * nz + iz;
-            if (protected_mask[idx]) {
-                continue;  // 平面保护：地面/墙面等结构性平面不参与清洗
-            }
+            // 保护体素【仍参与候选密度统计】：平面保护的作用是"保护点不被删除"，
+            // 而不是"让该处不产生候选"。若在此处跳过，室内密集的平面（地面/天花板）
+            // 会把邻近的动态目标（立柱、行人）一起排除在候选之外，导致清洗完全失效。
             if (ray_condemn_check(idx)) {
                 uint16_t c = cand_cnt[idx].load(std::memory_order_relaxed);
                 while (c < 0xFFFF && !cand_cnt[idx].compare_exchange_weak(c, c + 1, std::memory_order_relaxed)) {
@@ -1540,9 +1469,6 @@ void LaserMapping::RemoveDynamicByKeyframeRays() {
     {
         std::vector<int64_t> frontier;
         for (int64_t i = 0; i < n_cells; ++i) {
-            if (protected_mask[i]) {
-                continue;
-            }
             if (!ray_condemn_check(i)) {
                 continue;
             }
@@ -1585,7 +1511,7 @@ void LaserMapping::RemoveDynamicByKeyframeRays() {
                         continue;
                     }
                     const int64_t j = (jx * ny + jy) * nz + jz;
-                    if (remove_mask[j] || protected_mask[j]) {
+                    if (remove_mask[j]) {
                         continue;
                     }
                     if (pt_cnt[j].load(std::memory_order_relaxed) == 0) {
@@ -1594,12 +1520,13 @@ void LaserMapping::RemoveDynamicByKeyframeRays() {
                     const uint64_t c = cells[j].load(std::memory_order_relaxed);
                     const uint64_t pass_cnt = (c >> 48) & 0xFFFF;
                     const uint64_t end_cnt = (c >> 32) & 0xFFFF;
-                    const bool late_ok = !near_protected[j] &&
+                    const bool late_ok =
                                          late_cnt[j].load(std::memory_order_relaxed) >=
                                              (uint16_t)rayclean_late_pass_th_;
                     if (pass_cnt < (uint64_t)rayclean_pass_th_ || end_cnt < 1 ||
+                        (double)pass_cnt < rayclean_pass_end_ratio_ * (double)end_cnt ||
                         (!(late_ok || end_cnt <= (uint64_t)rayclean_grow_end_th_))) {
-                        continue;  // 无穿越证据，或观测次数过高且无迟到穿越（静态表面），不吸收
+                        continue;  // 无穿越证据/穿过次数不足，或观测次数过高且无迟到穿越
                     }
                     // 紧凑候选簇校验（与种子同源）：生长只能吸收"本身处于残影候选密集区"的体素。
                     // 缺此校验时生长会覆盖第3遍的"稀疏候选放回"保护——凡是紧挨种子的稀疏体素
@@ -1648,12 +1575,6 @@ void LaserMapping::RemoveDynamicByKeyframeRays() {
 
             bool remove = false;
             bool by_ray = false;
-            if (in_grid) {
-                int64_t idx = (ix * ny + iy) * nz + iz;
-                if (protected_mask[idx]) {
-                    in_grid = false;  // 平面保护：地面/墙面点一律保留
-                }
-            }
             if (in_grid) {
                 int64_t idx = (ix * ny + iy) * nz + iz;
                 const uint8_t mk = remove_mask[idx];
