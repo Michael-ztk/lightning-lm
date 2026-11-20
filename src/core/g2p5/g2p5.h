@@ -75,6 +75,9 @@ class G2P5 {
     /// 当地图发生改变时，可以向外发布，在这里设置它的回调
     void SetMapUpdateCallback(MapUpdateCallback func) { map_update_cb_ = func; }
 
+    /// 保存障碍物点云（高度带 min_th_floor~max_th_floor 内的世界坐标点）
+    void SaveObstacleCloud(const std::string &path);
+
     /// 退出渲染器
     void Quit();
 

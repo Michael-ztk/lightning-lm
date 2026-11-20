@@ -8,6 +8,7 @@
 #include <pcl/ModelCoefficients.h>
 #include <pcl/sample_consensus/method_types.h>
 #include <pcl/sample_consensus/model_types.h>
+#include <pcl/io/pcd_io.h>
 #include <map>
 #include <pcl/filters/impl/voxel_grid.hpp>
 #include <pcl/segmentation/impl/sac_segmentation.hpp>
@@ -18,6 +19,52 @@
 namespace lightning::g2p5 {
 
 G2P5::~G2P5() { Quit(); }
+
+
+void G2P5::SaveObstacleCloud(const std::string &path) {
+    std::vector<Keyframe::Ptr> all_keyframes;
+    {
+        UL lock(kf_mutex_);
+        all_keyframes = all_keyframes_;
+    }
+
+    if (all_keyframes.empty()) {
+        return;
+    }
+
+    CloudPtr obstacle_cloud(new PointCloudType());
+
+    for (const auto &kf : all_keyframes) {
+        SE3 Twb = kf->GetOptBodyPose();
+        auto cloud = kf->GetCloud();
+        if (!cloud) {
+            continue;
+        }
+        const double Z_ground = Twb.translation().z() + options_.default_floor_height_;
+
+        for (const auto &pt : cloud->points) {
+            Vec3d p_world = Twb * Vec3d(pt.x, pt.y, pt.z);
+            const double dis_world = p_world.z() - Z_ground;
+
+            if (dis_world > options_.min_th_floor_ && dis_world < options_.max_th_floor_) {
+                PointType p_obs;
+                p_obs.x = p_world[0];
+                p_obs.y = p_world[1];
+                p_obs.z = p_world[2];
+                p_obs.intensity = pt.intensity;
+                obstacle_cloud->points.push_back(p_obs);
+            }
+        }
+    }
+
+    if (!obstacle_cloud->empty()) {
+        obstacle_cloud->width = static_cast<uint32_t>(obstacle_cloud->size());
+        obstacle_cloud->height = 1;
+        obstacle_cloud->is_dense = false;
+        pcl::io::savePCDFileBinary(path, *obstacle_cloud);
+        LOG(INFO) << "Saved obstacle cloud: " << obstacle_cloud->size() << " points -> " << path;
+    }
+}
 
 void G2P5::Quit() {
     quit_flag_ = true;

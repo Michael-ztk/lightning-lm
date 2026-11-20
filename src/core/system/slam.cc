@@ -406,6 +406,9 @@ void SlamSystem::SaveMap(const std::string& path) {
 
         /// 存为ROS兼容的模式
         auto map = g2p5_->GetNewestMap()->ToROS();
+        // 保存障碍物点云（高度带 min_th_floor~max_th_floor 内的世界坐标点），
+        // 与栅格图同源，便于对照"为什么某个障碍物在栅格里没出现"
+        g2p5_->SaveObstacleCloud(save_path + "/obstacle_cloud.pcd");
         WriteGridPgm(map, save_path + "/map.pgm");
 
         /// yaml

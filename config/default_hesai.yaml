@@ -76,9 +76,9 @@ g2p5:
   lidar_height: 0.0   # 雷达安装高度
   floor_height: 0.0   # 默认地面高度
   min_th_floor: 0.1  # 距离地面这个高度的障碍物被扫入栅格地图中
-  max_th_floor: 1.0  # 距离地面这个高度的障碍物被扫入栅格地图中
+  max_th_floor: 1.5  # 距离地面这个高度的障碍物被扫入栅格地图中
   grid_map_resolution: 0.05 # 栅格地图分辨率
-  max_miss: 30 # 每格子最大miss次数
+  max_miss: 8                  # 每格子最大miss次数。越小障碍物越难被清除（细结构保得住）
   enable_outlier_filter: true # 是否启用离群点滤波
   min_occupied_neighbors: 2 # 离群点滤波阈值
 
