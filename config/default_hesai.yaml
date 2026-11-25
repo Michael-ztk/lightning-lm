@@ -106,7 +106,7 @@ loop_closing:
   min_id_interval: 10   # 被检查的关键帧ID间隔
   closest_id_th: 100    # 历史关键帧与当前帧的ID间隔
   max_range: 2.0        # 候选帧的最大距离
-  ndt_score_th: 5.0     # GICP 得分下限 = 1/fitness（只拦配准崩溃）
+  ndt_score_th: 2.0     # GICP 得分下限 = 1/fitness（原 5.0 会误杀好回环）
   source_submap_idx_range: 4   # 源子图单边 4 帧
   source_submap_stride: 2      # 步长 2 → 取 5 帧
   with_height: false
@@ -114,15 +114,21 @@ loop_closing:
   remove_ground_in_lc: false   # 子图构建时是否移除地面
 
   # 子图几何一致性检查（配准前）
-  max_submap_aspect: 5.0    # 子图 XY 长宽比上限，超过判为狭长通道（0=禁用）
-  max_centroid_dist: 2.0    # 子图质心距上限(m)，超过则检查覆盖度（0=禁用）
-  min_coverage_rate: 75.0   # 质心超限时的最小覆盖度(%)，取 max(正向,反向)
+  max_submap_aspect: 0.0    # 本分支改用墙面精修，几何验证关闭
+  max_centroid_dist: 0.0    # 同上
+  min_coverage_rate: 0.0    # 同上
   coverage_cell_size: 0.2   # 计算覆盖度时的 XY 栅格边长(m)
 
   # GICP 主配准
   gicp_reg_voxel: 0.15      # 降采样体素(m)
   gicp_reg_max_iter: 60     # 最大迭代次数
   gicp_reg_corr_dist: 1.0   # 最大对应点距离(m)
+
+  # 墙面中位数精修（GICP 之后，替代几何验证）
+  enable_wall_refine: true
+  wall_refine_thresh: 0.10   # 墙面残差上限(m)，超过拒绝
+  wall_refine_max_move: 0.5  # 修正量上限(m)，超过视为跑飞
+  wall_normal_z_thr: 0.3     # 竖直面判定：|nz| < 该值
 
   # 空间去重：同一区域在 半径+时间+帧数 三个窗口内只触发一次
   suppress_radius: 3.0   # 空间半径(m)，0=禁用

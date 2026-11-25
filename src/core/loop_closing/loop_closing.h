@@ -62,6 +62,16 @@ class LoopClosing {
         double suppress_radius_ = 3.0;   // 空间半径(m)，0=禁用
         double suppress_time_ = 300.0;   // 时间窗口(s)
         int suppress_kf_ = 600;          // 帧数窗口
+
+        /// 墙面中位数精修（GICP 之后）
+        /// GICP 最小化全局 RMSE（平方和），对离群点敏感；地面点在任何水平平移下
+        /// 最近邻距离几乎不变（平坦、无约束），墙面才是走廊轴向位移的唯一约束来源。
+        /// 因此走廊场景容易收敛到"墙错开十几厘米"的解。改用墙面残差【中位数】
+        /// （抗离群）直接优化 (dx,dy,dyaw) 可修正这类解，且在已正确的解上几乎不动。
+        bool enable_wall_refine_ = true;
+        double wall_refine_thresh_ = 0.10;    // 精修后墙面残差中位数上限(m)，超过则拒绝
+        double wall_refine_max_move_ = 0.5;   // 允许的最大修正量(m)
+        double wall_normal_z_thr_ = 0.3;      // 竖直面判定：|nz| < 该值
     };
 
     LoopClosing(Options options = Options()) { options_ = options; }
@@ -86,6 +96,14 @@ class LoopClosing {
 
     /// 计算单个回环候选
     void ComputeForCandidate(LoopCandidate& c);
+
+    /// 墙面中位数精修：在 GICP 结果基础上优化 (dx,dy,dyaw)，使墙面残差中位数最小
+    /// @param source    源点云（已按 GICP 结果变换到目标坐标系）
+    /// @param target    目标子图
+    /// @param T         输入输出：待精修的位姿
+    /// @param residual  输出：精修后的墙面残差中位数(m)
+    /// @return 残差是否低于阈值（true=接受）
+    bool RefineByWallMedian(const CloudPtr& source, const CloudPtr& target, SE3& T, double& residual);
 
     /// 优化位姿
     void PoseOptimization();

@@ -26,6 +26,8 @@ struct LoopCandidate {
     double centroid_dist_ = 0.0;
     // 质心超限时的最大覆盖度(%)：max(src->tgt, tgt->src)
     double coverage_rate_ = 100.0;
+    // 墙面残差中位数(m)：GICP 精修后的墙面贴合度，越小越好
+    double wall_residual_ = -1.0;
 };
 
 }  // namespace lightning
