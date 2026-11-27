@@ -72,6 +72,21 @@ class LoopClosing {
         double wall_refine_thresh_ = 0.10;    // 精修后墙面残差中位数上限(m)，超过则拒绝
         double wall_refine_max_move_ = 0.5;   // 允许的最大修正量(m)
         double wall_normal_z_thr_ = 0.3;      // 竖直面判定：|nz| < 该值
+
+        /// 配准模式：
+        ///   "gicp_wall"（默认，incumbent）：GICP 主配准 + 墙面中位数精修
+        ///   "thinwall"（challenger）：单遍紧核薄墙配准，从轨迹初值出发整体替代 GICP+精修
+        ///   （rk100 上验证过的 full_regress.py 算法的 C++ 移植：紧 Huber 核 + 平面性/距离加权
+        ///    + 残差门限调度 + 定向法向门控；修正量限定平面自由度 (dx,dy,dyaw)，z/roll/pitch 锁定在初值）
+        std::string reg_mode_ = "thinwall";
+
+        // ---- thinwall 配准参数（challenger）----
+        int thinwall_max_outer_ = 10;        // IRLS 外层迭代数（对应验证脚本的 iters）
+        double thinwall_huber_delta_ = 0.05; // 紧 Huber 核阈值 FSCALE（紧核是精度关键）
+        int thinwall_knn_ = 20;              // 目标邻域 KNN 数（邻域平面拟合用）
+        double thinwall_nn_radius_ = 1.2;    // 目标邻域最大半径(m)
+        double thinwall_floor_z_ = -1.0;     // 地面判定：z < 该值 → 法向强制 +z
+        double thinwall_ceil_z_ = 1.8;       // 天花板判定：z > 该值 → 法向强制 -z
     };
 
     LoopClosing(Options options = Options()) { options_ = options; }
@@ -104,6 +119,23 @@ class LoopClosing {
     /// @param residual  输出：精修后的墙面残差中位数(m)
     /// @return 残差是否低于阈值（true=接受）
     bool RefineByWallMedian(const CloudPtr& source, const CloudPtr& target, SE3& T, double& residual);
+
+    /// 单遍紧核薄墙配准（challenger，reg_mode = "thinwall"）
+    /// 从轨迹初值 T_init 出发的 IRLS 点到面配准：定向法向门控 + 邻域平面拟合 +
+    /// 平面性/距离加权 + 残差门限调度 + 紧 Huber 核 GN。修正量限定平面自由度
+    /// (dx,dy,dyaw)（绕源质心旋转），z/roll/pitch 锁定在初值。
+    /// @param source  源点云（源帧局部系）
+    /// @param target  目标点云（世界系）
+    /// @param T_init  轨迹初值（世界 <- 源局部）
+    /// @param T_final 输出：配准结果（= Delta(dx,dy,dyaw) * T_init）
+    /// @param move    输出：修正量 |(dx,dy)|(m)，供 move 上限验收
+    /// @return 配准流程是否完成（验收由调用方以统一尺子度量）
+    bool RegisterByThinWall(const CloudPtr& source, const CloudPtr& target, const SE3& T_init, SE3& T_final,
+                            double& move);
+
+    /// 统一验收尺子：cloud（目标系）到全分辨率 target 的墙面 NN 残差中位数
+    /// （与 incumbent RefineByWallMedian 内部完全相同的度量）
+    double WallResidualOnFullTarget(const CloudPtr& cloud, const CloudPtr& target_full);
 
     /// 优化位姿
     void PoseOptimization();

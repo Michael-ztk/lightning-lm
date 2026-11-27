@@ -129,6 +129,15 @@ loop_closing:
   wall_refine_thresh: 0.10   # 墙面残差上限(m)，超过拒绝
   wall_refine_max_move: 0.5  # 修正量上限(m)，超过视为跑飞
   wall_normal_z_thr: 0.3     # 竖直面判定：|nz| < 该值
+  # 回环配准模式：thinwall（默认，单遍紧核薄墙配准）/ gicp_wall（旧：GICP+墙面精修）
+  # thinwall 单环 ~0.15s、一次出结果；gicp_wall 需 GICP 后再坐标下降精修，单环 ~0.35s
+  reg_mode: thinwall
+  thinwall_max_outer: 10     # IRLS 外层迭代上限（res 调度 1.0/0.75/0.5）
+  thinwall_huber_delta: 0.05 # 紧 Huber 阈值（精度关键，勿轻易放大）
+  thinwall_knn: 20           # 目标邻域 KNN
+  thinwall_nn_radius: 1.2    # 目标邻域半径(m)
+  thinwall_floor_z: -1.0     # z < 此值判为地面，法向强制 +z
+  thinwall_ceil_z: 1.8       # z > 此值判为天花板，法向强制 -z
 
   # 空间去重：同一区域在 半径+时间+帧数 三个窗口内只触发一次
   suppress_radius: 3.0   # 空间半径(m)，0=禁用

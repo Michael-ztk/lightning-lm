@@ -9,11 +9,13 @@
 
 #include <unordered_set>
 #include <cmath>
+#include <chrono>
 #include <pcl/common/transforms.h>
 #include <pcl/io/pcd_io.h>
 #include <pcl/registration/ndt.h>
 #include <pcl/registration/gicp.h>
 #include <pcl/features/normal_3d.h>
+#include <Eigen/Eigenvalues>
 
 #include "core/opti_algo/algo_select.h"
 #include "core/robust_kernel/cauchy.h"
@@ -74,6 +76,39 @@ void LoopClosing::Init(const std::string yaml_path) {
         options_.wall_refine_thresh_ = yaml.GetValue<double>("loop_closing", "wall_refine_thresh");
         options_.wall_refine_max_move_ = yaml.GetValue<double>("loop_closing", "wall_refine_max_move");
         options_.wall_normal_z_thr_ = yaml.GetValue<double>("loop_closing", "wall_normal_z_thr");
+
+        // 新增键（reg_mode / thinwall_*）：旧配置不含这些键时保持默认值（GetValue 缺键抛异常，容错处理）
+        try {
+            options_.reg_mode_ = yaml.GetValue<std::string>("loop_closing", "reg_mode");
+        } catch (...) {
+        }
+        try {
+            options_.thinwall_max_outer_ = yaml.GetValue<int>("loop_closing", "thinwall_max_outer");
+        } catch (...) {
+        }
+        try {
+            options_.thinwall_huber_delta_ = yaml.GetValue<double>("loop_closing", "thinwall_huber_delta");
+        } catch (...) {
+        }
+        try {
+            options_.thinwall_knn_ = yaml.GetValue<int>("loop_closing", "thinwall_knn");
+        } catch (...) {
+        }
+        try {
+            options_.thinwall_nn_radius_ = yaml.GetValue<double>("loop_closing", "thinwall_nn_radius");
+        } catch (...) {
+        }
+        try {
+            options_.thinwall_floor_z_ = yaml.GetValue<double>("loop_closing", "thinwall_floor_z");
+        } catch (...) {
+        }
+        try {
+            options_.thinwall_ceil_z_ = yaml.GetValue<double>("loop_closing", "thinwall_ceil_z");
+        } catch (...) {
+        }
+        LOG(INFO) << "[lc] reg_mode = " << options_.reg_mode_
+                  << (options_.reg_mode_ == "thinwall" ? " (challenger: 单遍紧核薄墙配准)"
+                                                       : " (incumbent: GICP+墙面精修)");
     }
 
     if (options_.online_mode_) {
@@ -446,6 +481,77 @@ void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
         return;
     }
 
+    // ===== 对准模式二选一（reg_mode）：gicp_wall（默认，GICP+墙中位精修）/ thinwall（NVMS 紧核挑战者） =====
+    // 两种模式共用同一条验收尺子（全分辨率 submap_kf1 的墙中位残差 + move 上限）与
+    // 同一评分口径（NN 均方距离 → 1/MSE → ndt_score_th_ 闸门），保证 A/B 可比。
+    Quatd q = Quatd::Identity();
+    Vec3d t = Vec3d::Zero();
+    SE3 wall_refined_T;
+    bool wall_refine_done = false;
+
+    if (options_.reg_mode_ == "thinwall") {
+        // ---- thinwall：不跑 GICP，从轨迹初值 T_init 出发做紧核薄墙配准 ----
+        const auto tw_start = std::chrono::steady_clock::now();
+        const Mat4d Ti = Tw2.cast<double>();
+        Quatd qi(Ti.block<3, 3>(0, 0));
+        qi.normalize();
+        const SE3 T_init(qi, Ti.block<3, 1>(0, 3));
+        SE3 T_final;
+        double tw_move = 0.0;
+        if (!RegisterByThinWall(rough_map2, rough_map1, T_init, T_final, tw_move)) {
+            LOG(ERROR) << "[lc] REJECT thinwall " << c.idx1_ << "-" << c.idx2_ << ": registration degenerate";
+            c.ndt_score_ = 0;
+            return;
+        }
+        Tw2 = T_final.matrix().cast<float>();
+        q = Quatd(T_final.so3().matrix());
+        q.normalize();
+        t = T_final.translation();
+        pcl::transformPointCloud(*rough_map2, *output, Tw2);
+
+        // 统一验收尺子（与 incumbent 完全一致）：cloud 对全分辨率 submap_kf1 的墙中位残差
+        const double wall_res = WallResidualOnFullTarget(output, submap_kf1);
+        c.wall_residual_ = wall_res;
+        if (tw_move > options_.wall_refine_max_move_) {
+            LOG(ERROR) << "[lc] REJECT thinwall " << c.idx1_ << "-" << c.idx2_ << ": move " << tw_move
+                       << "m > " << options_.wall_refine_max_move_ << "m (residual=" << wall_res << ")";
+            c.ndt_score_ = 0;
+            return;
+        }
+        if (wall_res >= options_.wall_refine_thresh_) {
+            LOG(ERROR) << "[lc] REJECT thinwall " << c.idx1_ << "-" << c.idx2_ << ": 墙面残差 " << wall_res
+                       << " >= 阈值 " << options_.wall_refine_thresh_ << " (move=" << tw_move << "m)";
+            c.ndt_score_ = 0;
+            return;
+        }
+
+        // 评分口径与 GICP getFitnessScore() 等价：output→rough_map1 全部点的最近邻均方距离
+        //（无 cutoff，与 499 行 getFitnessScore() 语义一致），1/MSE，过同一 ndt_score_th_ 闸门
+        double mse = 1e9;
+        {
+            pcl::KdTreeFLANN<PointType> score_tree;
+            score_tree.setInputCloud(rough_map1);
+            std::vector<int> nn_idx(1);
+            std::vector<float> nn_sq(1);
+            size_t n_used = 0;
+            double sq_sum = 0.0;
+            for (const auto& pt : output->points) {
+                if (!std::isfinite(pt.x)) continue;
+                if (score_tree.nearestKSearch(pt, 1, nn_idx, nn_sq) < 1) continue;
+                sq_sum += static_cast<double>(nn_sq[0]);
+                ++n_used;
+            }
+            if (n_used > 0) mse = sq_sum / static_cast<double>(n_used);
+        }
+        c.ndt_score_ = 1.0 / std::max(mse, 1e-6);
+
+        wall_refined_T = T_final;
+        wall_refine_done = true;
+        const double tw_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tw_start).count();
+        LOG(INFO) << "[lc] ACCEPT thinwall " << c.idx1_ << "-" << c.idx2_ << ": 墙面残差 " << wall_res
+                  << " move=" << tw_move << "m score=" << c.ndt_score_ << " (" << tw_ms << "ms)";
+    } else {
     double fitness = 1e9;
     try {
         pcl::GeneralizedIterativeClosestPoint<PointType, PointType> gicp;
@@ -484,16 +590,15 @@ void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
     }
 
     Mat4d T = Tw2.cast<double>();
-    Quatd q(T.block<3, 3>(0, 0));
+    q = Quatd(T.block<3, 3>(0, 0));
     q.normalize();
-    Vec3d t = T.block<3, 1>(0, 3);
+    t = T.block<3, 1>(0, 3);
 
     // ===== 墙面中位数精修 =====
     // GICP 最小化全局 RMSE（平方和），对离群点敏感、且地面点在任何水平平移下
     // 距离几乎不变（无约束），走廊场景容易收敛到"墙错开十几厘米"的解。
     // 这里改用墙面残差【中位数】（抗离群）直接优化 (dx,dy,dyaw)。
-    SE3 wall_refined_T;
-    bool wall_refine_done = false;
+    // wall_refined_T / wall_refine_done 已在分支外声明（两种模式共用，save 块读取外层变量）
     if (options_.enable_wall_refine_) {
         SE3 Twl_refine(q, t);
         double wall_res = std::numeric_limits<double>::max();
@@ -527,6 +632,7 @@ void LoopClosing::ComputeForCandidate(lightning::LoopCandidate& c) {
             return;
         }
     }
+    }  // ===== end reg_mode gicp_wall（incumbent） =====
 
     SE3 Twl2_aligned(q, t);
     SE3 Tl2b2 = kf2->GetOptLidarPose().inverse() * kf2->GetOptBodyPose();
@@ -598,7 +704,341 @@ double WallMedianResidual(const CloudPtr& cloud, const pcl::PointCloud<pcl::Norm
     return wall_d[mid];
 }
 
+/// 法向定向 + 可信掩码 om（full_regress.py orient_vec 的 C++ 移植）
+/// 地板/天花板点强制 ±z；墙面点（|nz|<0.3 且非地板/天花板）做成对反极性定向
+/// （同一面墙两侧观测的法向应互相指向对方），无配对的墙点用自由侧计数定向。
+/// om 输出"法向已定向、可参与反极性门控"的掩码（地板/天花板/墙面）。
+/// 注意：法向会被就地修改；om 与 cloud 点一一对应。
+void OrientNormals(const CloudPtr& cloud, pcl::PointCloud<pcl::Normal>::Ptr& normals, double floor_z,
+                   double ceil_z, std::vector<bool>& om) {
+    om.assign(cloud ? cloud->size() : 0, false);
+    if (!cloud || !normals || normals->size() != cloud->size()) return;
+    const size_t n = cloud->size();
+
+    // 归一化 + 地板/天花板强制 ±z（与 Python：先归一化、后按高度强制一致）
+    std::vector<int> wall_idx;
+    wall_idx.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        auto& nrm = normals->points[i];
+        double nx = nrm.normal_x, ny = nrm.normal_y, nz = nrm.normal_z;
+        const double norm = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (norm > 1e-12) {
+            nx /= norm;
+            ny /= norm;
+            nz /= norm;
+        }
+        const double z = cloud->points[i].z;
+        const bool is_floor = z < floor_z;
+        const bool is_ceil = z > ceil_z;
+        if (is_floor) {
+            nx = 0.0;
+            ny = 0.0;
+            nz = 1.0;
+        } else if (is_ceil) {
+            nx = 0.0;
+            ny = 0.0;
+            nz = -1.0;
+        }
+        nrm.normal_x = nx;
+        nrm.normal_y = ny;
+        nrm.normal_z = nz;
+        om[i] = is_floor || is_ceil;
+        if (!is_floor && !is_ceil && std::fabs(nz) < 0.3) wall_idx.push_back(static_cast<int>(i));
+    }
+    const size_t nw = wall_idx.size();
+    if (nw <= 10) return;  // 墙点太少不做成对定向（om 只含地板/天花板）
+
+    // 抽取墙面点与其法向
+    CloudPtr walls(new PointCloudType);
+    walls->points.resize(nw);
+    walls->width = static_cast<uint32_t>(nw);
+    walls->height = 1;
+    walls->is_dense = false;
+    std::vector<Vec3d> wpos(nw), nwv(nw);
+    for (size_t i = 0; i < nw; ++i) {
+        walls->points[i] = cloud->points[wall_idx[i]];
+        wpos[i] = Vec3d(walls->points[i].x, walls->points[i].y, walls->points[i].z);
+        const auto& nrm = normals->points[wall_idx[i]];
+        nwv[i] = Vec3d(nrm.normal_x, nrm.normal_y, nrm.normal_z);
+    }
+
+    // 成对反极性定向：k=8 邻域（ub=0.45）内第一个 dots<-0.7 的邻居为 partner，
+    // 若 (W_i - W_j)·N_i < 0 则翻转（法向应背离 partner 一侧）
+    pcl::KdTreeFLANN<PointType> wtree;
+    wtree.setInputCloud(walls);
+    std::vector<int> idx(8);
+    std::vector<float> sq(8);
+    std::vector<int> partner(nw, -1);
+    constexpr double kPairR2 = 0.45 * 0.45;
+    for (size_t i = 0; i < nw; ++i) {
+        const int found = wtree.nearestKSearch(walls->points[i], 8, idx, sq);
+        for (int k = 0; k < found; ++k) {
+            if (sq[k] > kPairR2) continue;        // distance_upper_bound=0.45
+            if (sq[k] < 1e-18) continue;          // 排除自身（dd<1e-9）
+            if (nwv[i].dot(nwv[idx[k]]) < -0.7) {
+                partner[i] = idx[k];
+                break;                            // 取第一个满足的邻居
+            }
+        }
+    }
+    for (size_t i = 0; i < nw; ++i) {
+        const int j = partner[i];
+        if (j < 0) continue;
+        if ((wpos[i] - wpos[j]).dot(nwv[i]) < 0) nwv[i] = -nwv[i];
+    }
+
+    // 自由侧定向：无配对的墙点，法向指向点更稀疏的一侧（±0.4m 偏移点各数 10 邻域，
+    // ub=0.28，排除距墙点自身 <0.1 的邻居）
+    pcl::KdTreeFLANN<PointType> atree;
+    atree.setInputCloud(cloud);
+    std::vector<int> idx2(10);
+    std::vector<float> sq2(10);
+    constexpr double kFreeR2 = 0.28 * 0.28;
+    for (size_t i = 0; i < nw; ++i) {
+        if (partner[i] >= 0) continue;
+        const Vec3d& w = wpos[i];
+        const Vec3d& nn = nwv[i];
+        auto cnt_off = [&](const Vec3d& s) -> int {
+            PointType q = cloud->points[wall_idx[i]];
+            q.x = static_cast<float>(s.x());
+            q.y = static_cast<float>(s.y());
+            q.z = static_cast<float>(s.z());
+            const int f = atree.nearestKSearch(q, 10, idx2, sq2);
+            int cnt = 0;
+            for (int k = 0; k < f; ++k) {
+                if (sq2[k] > kFreeR2) continue;   // distance_upper_bound=0.28
+                const auto& nb = cloud->points[idx2[k]];
+                const double dx = nb.x - w.x(), dy = nb.y - w.y(), dz = nb.z - w.z();
+                if (dx * dx + dy * dy + dz * dz > 0.1 * 0.1) ++cnt;  // 排除墙点自身
+            }
+            return cnt;
+        };
+        const int c1 = cnt_off(w + 0.4 * nn);
+        const int c2 = cnt_off(w - 0.4 * nn);
+        if (c1 != c2 && c1 < c2) nwv[i] = -nwv[i];
+    }
+
+    // 写回 + om 标记墙面点
+    for (size_t i = 0; i < nw; ++i) {
+        auto& nrm = normals->points[wall_idx[i]];
+        nrm.normal_x = nwv[i].x();
+        nrm.normal_y = nwv[i].y();
+        nrm.normal_z = nwv[i].z();
+        om[wall_idx[i]] = true;
+    }
+}
+
 }  // namespace
+
+double LoopClosing::WallResidualOnFullTarget(const CloudPtr& cloud, const CloudPtr& target_full) {
+    if (!cloud || !target_full || cloud->empty() || target_full->empty()) {
+        return std::numeric_limits<double>::max();
+    }
+    // 与 incumbent 精修同一把尺子：目标全分辨率点云 20NN 法向 + 源点最近邻距离中位数（墙点）
+    pcl::PointCloud<pcl::Normal>::Ptr tn;
+    EstimateNormals(target_full, tn, options_.thinwall_knn_);
+    if (!tn || tn->size() != target_full->size()) {
+        return std::numeric_limits<double>::max();
+    }
+    pcl::KdTreeFLANN<PointType> tree;
+    tree.setInputCloud(target_full);
+    return WallMedianResidual(cloud, tn, tree, options_.wall_normal_z_thr_);
+}
+
+/// NVMS 紧核薄墙配准（full_regress.py nvms_tight 的 3-DOF 移植，主循环在 rk100 已验证）。
+/// - source：源帧局部系体素云（rough_map2）；target：世界系体素云（rough_map1）
+/// - 参数化：T_final = Delta(bx,by,dyaw)·T_init，Delta 绕固定中心 c_w（T_init·src 质心），
+///   与 incumbent RefineByWallMedian 的 Delta 合成公式完全一致（z/roll/pitch 锁定，信任轨迹）
+/// - 邻域平面拟合 + 反极性/平行度门控 + 紧 Huber IRLS（对应 scipy least_squares(huber, f_scale)）
+bool LoopClosing::RegisterByThinWall(const CloudPtr& source, const CloudPtr& target, const SE3& T_init,
+                                     SE3& T_final, double& move) {
+    move = 0.0;
+    T_final = T_init;
+    if (!source || !target || source->size() < 50 || target->size() < 50) return false;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    const size_t ns = source->size();
+    const size_t nt = target->size();
+
+    // 1) 法向估计 + orient_vec 定向（两侧观测反极性配对 / 自由侧计数 / 地板天花板强制）
+    pcl::PointCloud<pcl::Normal>::Ptr sn, tn;
+    EstimateNormals(source, sn, options_.thinwall_knn_);
+    EstimateNormals(target, tn, options_.thinwall_knn_);
+    if (!sn || sn->size() != ns || !tn || tn->size() != nt) return false;
+    std::vector<bool> s_om, t_om;
+    OrientNormals(source, sn, options_.thinwall_floor_z_, options_.thinwall_ceil_z_, s_om);
+    OrientNormals(target, tn, options_.thinwall_floor_z_, options_.thinwall_ceil_z_, t_om);
+
+    // 2) 源点世界系初值 p_i = T_init·s_i；固定旋转中心 c_w = mean(p)
+    std::vector<Vec3d> p(ns);
+    Vec3d c_w = Vec3d::Zero();
+    for (size_t i = 0; i < ns; ++i) {
+        const auto& s = source->points[i];
+        p[i] = T_init * Vec3d(s.x, s.y, s.z);
+        c_w += p[i];
+    }
+    c_w /= static_cast<double>(ns);
+
+    // 3) 目标 KD 树与常量（与 Python 严格一致：k=20, ub=1.2, cos(100°)）
+    pcl::KdTreeFLANN<PointType> ttree;
+    ttree.setInputCloud(target);
+    const int K = options_.thinwall_knn_;
+    const double ub2 = options_.thinwall_nn_radius_ * options_.thinwall_nn_radius_;
+    constexpr double kCos100 = -0.17364817766693033;  // cos(100°)
+    constexpr double kPar = 0.17364817766693033;      // |cos(100°)|
+    const double huber_delta = options_.thinwall_huber_delta_;
+    std::vector<int> nn_idx(K);
+    std::vector<float> nn_sq(K);
+
+    // 4) IRLS 外层：res 调度 1.0/0.75/0.5（it<2/it<3/其余）
+    double bx = 0.0, by = 0.0, byaw = 0.0;
+    bool solved_any = false;
+    int iters_done = 0;
+    size_t last_n_use = 0;
+
+    // 每个源点的对应平面缓存（外层迭代内固定，内层 GN 共用）
+    std::vector<Vec3d> mu(ns), npv(ns), pp_rel(ns);
+    std::vector<double> pw(ns);
+    std::vector<char> usable(ns, 0);
+
+    for (int it = 0; it < options_.thinwall_max_outer_; ++it) {
+        iters_done = it + 1;
+        const double res = it < 2 ? 1.0 : (it < 3 ? 0.75 : 0.5);
+        const double cb = std::cos(byaw), sb = std::sin(byaw);
+
+        // ---- 对应搜索 + 逐点平面拟合（mu / n_p / a2D 权重）----
+        size_t n_use = 0;
+        for (size_t i = 0; i < ns; ++i) {
+            usable[i] = 0;
+            const Vec3d rel = p[i] - c_w;
+            const Vec3d pp(cb * rel.x() - sb * rel.y(), sb * rel.x() + cb * rel.y(), rel.z());
+            const Vec3d q = pp + c_w + Vec3d(bx, by, 0.0);
+            pp_rel[i] = pp;
+
+            PointType qp = source->points[i];
+            qp.x = static_cast<float>(q.x());
+            qp.y = static_cast<float>(q.y());
+            qp.z = static_cast<float>(q.z());
+            const int found = ttree.nearestKSearch(qp, K, nn_idx, nn_sq);
+
+            const Eigen::Vector3f& s_n = sn->points[i].getNormalVector3fMap();
+            int cnt = 0;
+            Vec3d mu_i = Vec3d::Zero();
+            for (int k = 0; k < found; ++k) {
+                if (nn_sq[k] > ub2) continue;  // distance_upper_bound
+                const int j = nn_idx[k];
+                const auto& nb = target->points[j];
+                const Eigen::Vector3f& t_n = tn->points[j].getNormalVector3fMap();
+                const float dot = s_n.dot(t_n);
+                const bool gate = (s_om[i] && t_om[j]) ? (dot > kCos100) : (std::fabs(dot) > kPar);
+                if (!gate) continue;
+                mu_i += Vec3d(nb.x, nb.y, nb.z);
+                ++cnt;
+            }
+            if (cnt < 4) continue;  // ok = cnt>=4
+            mu_i /= static_cast<double>(cnt);
+
+            // 协方差 + 最小特征向量（法向）
+            Mat3d cov = Mat3d::Zero();
+            for (int k = 0; k < found; ++k) {
+                if (nn_sq[k] > ub2) continue;
+                const int j = nn_idx[k];
+                const Eigen::Vector3f& t_n = tn->points[j].getNormalVector3fMap();
+                const float dot = s_n.dot(t_n);
+                const bool gate = (s_om[i] && t_om[j]) ? (dot > kCos100) : (std::fabs(dot) > kPar);
+                if (!gate) continue;
+                const auto& nb = target->points[j];
+                const Vec3d d(nb.x - mu_i.x(), nb.y - mu_i.y(), nb.z - mu_i.z());
+                cov += d * d.transpose();
+            }
+            cov /= static_cast<double>(std::max(cnt - 1, 1));
+
+            Eigen::SelfAdjointEigenSolver<Mat3d> es(cov);
+            if (es.info() != Eigen::Success) continue;
+            const Vec3d ev = es.eigenvalues();                 // 升序
+            Vec3d n_p = es.eigenvectors().col(0);              // 最小特征向量
+            const double a2d =
+                (std::sqrt(std::max(ev[1], 0.0)) - std::sqrt(std::max(ev[0], 0.0))) /
+                (std::sqrt(std::max(ev[2], 0.0)) + 1e-12);
+            // 与源法向同侧（sgn = sign(n_p·sn)，0 → 1）
+            double sgn = n_p.dot(Vec3d(s_n.x(), s_n.y(), s_n.z()));
+            if (sgn == 0.0) sgn = 1.0;
+            n_p *= sgn > 0 ? 1.0 : -1.0;
+
+            const Vec3d diff = q - mu_i;
+            const double r = diff.dot(n_p);
+            const double dq = diff.norm();
+            const double w = 0.5 * a2d + 0.5 * std::exp(-dq / (res * 4.0));
+            if (!std::isfinite(r) || std::fabs(r) >= res) continue;  // use = |r|<res
+
+            mu[i] = mu_i;
+            npv[i] = n_p;
+            pw[i] = w;
+            usable[i] = 1;
+            ++n_use;
+        }
+        last_n_use = n_use;
+        if (n_use < 50) break;  // Python: len(Is)<50 → break
+
+        // ---- 内层 GN（≤10 步，对应 scipy least_squares(max_nfev=60)）----
+        for (int inner = 0; inner < 10; ++inner) {
+            const double cbi = std::cos(byaw), sbi = std::sin(byaw);
+            Mat3d H = Mat3d::Zero();
+            Vec3d g = Vec3d::Zero();
+            for (size_t i = 0; i < ns; ++i) {
+                if (!usable[i]) continue;
+                const Vec3d& n_p = npv[i];
+                // 残差模型 e(δ) = n_p·( Rz(byaw+δyaw)(p_i-c_w) + c_w + [bx+δx, by+δy, 0] - mu_i )
+                const Vec3d rel = p[i] - c_w;
+                const Vec3d pp(cbi * rel.x() - sbi * rel.y(), sbi * rel.x() + cbi * rel.y(), rel.z());
+                const Vec3d q = pp + c_w + Vec3d(bx, by, 0.0);
+                const double e = (q - mu[i]).dot(n_p);
+                // 雅可比：∂/∂bx → n_p.x；∂/∂by → n_p.y；∂/∂dyaw → n_p·ẑ×pp = (-pp.y, pp.x, 0)
+                Eigen::Matrix<double, 1, 3> J;
+                J(0) = n_p.x();
+                J(1) = n_p.y();
+                J(2) = n_p.x() * (-pp.y()) + n_p.y() * pp.x();
+                // 紧 Huber 权（f_scale=0.05）：|e|≤δ → 1，否则 δ/|e|
+                const double rho = pw[i] * (std::fabs(e) <= huber_delta ? 1.0 : huber_delta / std::fabs(e));
+                H += rho * J.transpose() * J;
+                g += rho * J.transpose() * e;
+            }
+            const double damp = 1e-9 * std::max(1.0, H.trace() / 3.0);
+            Mat3d Hd = H;
+            for (int d = 0; d < 3; ++d) Hd(d, d) += damp;
+            const Vec3d delta = -Hd.ldlt().solve(g);
+            if (!delta.allFinite()) break;
+            bx += delta.x();
+            by += delta.y();
+            byaw += delta.z();
+            solved_any = true;
+            if (std::fabs(delta.x()) < 1e-8 && std::fabs(delta.y()) < 1e-8 && std::fabs(delta.z()) < 1e-9) break;
+        }
+        if (!std::isfinite(bx) || !std::isfinite(by) || !std::isfinite(byaw)) return false;
+    }
+
+    if (!solved_any) return false;  // 从未得到可用对应（退化），交由调用方拒绝
+
+    // 5) 合成：T_final = Delta·T_init，Delta 绕 c_w 旋转 dyaw 后平移 (bx,by,0)
+    //    与 incumbent RefineByWallMedian 771-776 行完全同一公式
+    move = std::hypot(bx, by);
+    const double cb = std::cos(byaw), sb = std::sin(byaw);
+    Mat3d Rd;
+    Rd << cb, -sb, 0.0, sb, cb, 0.0, 0.0, 0.0, 1.0;
+    const Vec3d t_delta = c_w + Vec3d(bx, by, 0.0) - Rd * c_w;
+    const SE3 Delta(SO3(Rd), t_delta);
+    T_final = Delta * T_init;
+
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    static double total_ms = 0.0;
+    static int total_calls = 0;
+    total_ms += ms;
+    ++total_calls;
+    LOG(INFO) << "[thinwall] src=" << ns << " tgt=" << nt << " iters=" << iters_done << " used=" << last_n_use
+              << " delta=(" << bx << "," << by << "," << byaw << ") move=" << move << " " << ms
+              << "ms (avg " << total_ms / total_calls << "ms over " << total_calls << " calls)";
+    return true;
+}
 
 bool LoopClosing::RefineByWallMedian(const CloudPtr& source, const CloudPtr& target, SE3& T, double& residual) {
     residual = std::numeric_limits<double>::max();
